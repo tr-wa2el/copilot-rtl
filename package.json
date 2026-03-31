@@ -3,19 +3,20 @@
   "displayName": "Copilot RTL",
   "description": "change the direction of copilot chat to right-to-left for Arabic",
   "version": "0.1.0",
-  "publisher": "wael-abosamra",
+  "publisher": "WaelAboSamra",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/tr-wa2el/copilot-rtl"
   },
-  "keywords": ["rtl", "arabic", "persian", "copilot", "wael-abosamra"],
+  "keywords": ["rtl", "arabic", "persian", "copilot", "WaelAboSamra"],
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": ["Other"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
+  "icon": "images/icon.png",
   "contributes": {
     "configuration": {
       "title": "Copilot RTL",
@@ -31,6 +32,32 @@
           "minimum": 8,
           "maximum": 40,
           "description": "Font size in pixels for RTL Arabic text in Copilot chat"
+        },
+        "copilotRtl.lineHeight": {
+          "type": "number",
+          "default": 1.8,
+          "minimum": 1,
+          "maximum": 4,
+          "description": "Line height (line spacing) for RTL Arabic text in Copilot chat (e.g. 1.5, 1.8, 2)"
+        },
+        "copilotRtl.ltrFontFamily": {
+          "type": "string",
+          "default": "",
+          "description": "Font family for LTR English text in Copilot chat. Leave empty to use VS Code default."
+        },
+        "copilotRtl.ltrFontSize": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 40,
+          "description": "Font size in pixels for LTR English text in Copilot chat. Set to 0 to use VS Code default."
+        },
+        "copilotRtl.ltrLineHeight": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 4,
+          "description": "Line height for LTR English text in Copilot chat. Set to 0 to use VS Code default."
         }
       }
     },
