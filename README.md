@@ -8,6 +8,18 @@ Adds automatic **RTL (Right-to-Left)** support to VS Code Copilot chat for Arabi
 
 ---
 
+## Screenshots
+
+**VS Code**
+
+![VS Code](images/vs-code.png)
+
+**Antigravity**
+
+![Antigravity](images/antigravity.png)
+
+---
+
 ## Usage
 
 Open the Command Palette (`Ctrl+Shift+P`) and run:
@@ -26,6 +38,9 @@ Open the Command Palette (`Ctrl+Shift+P`) and run:
 
 1. Open **Settings** (`Ctrl+,`)
 2. Search for **Copilot RTL**
+
+> **Antigravity users:** `Ctrl+,` opens Antigravity's own settings, not VS Code settings.
+> To access Copilot RTL settings in Antigravity, open the Command Palette (`Ctrl+Shift+P`) and search for **"Preferences: Open Settings (UI)"**, then search for **Copilot RTL**.
 
 ### Arabic (RTL) text
 
