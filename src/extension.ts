@@ -107,13 +107,75 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         });
     }
 
+    // ── Antigravity chat support (React + Tailwind + Lexical) ──────────
+    function scanAntigravity() {
+        // Bot response paragraphs, list items, headings
+        var selectors = [
+            '.leading-relaxed.select-text p',
+            '.leading-relaxed.select-text li',
+            '.leading-relaxed.select-text h1',
+            '.leading-relaxed.select-text h2',
+            '.leading-relaxed.select-text h3',
+            '.leading-relaxed.select-text h4',
+        ];
+        document.querySelectorAll(selectors.join(',')).forEach(function (el) {
+            if (el.tagName === 'PRE' || el.tagName === 'CODE' || el.closest('pre') || el.closest('code')) { return; }
+            applyDirection(el);
+        });
+
+        // Bot response container direction
+        document.querySelectorAll('.leading-relaxed.select-text').forEach(function (el) {
+            if (isArabicOrMixed(el.textContent || '')) {
+                el.style.direction = 'rtl';
+            }
+        });
+
+        // User messages (skip code/pre elements that also use whitespace-pre-wrap)
+        document.querySelectorAll('.whitespace-pre-wrap').forEach(function (el) {
+            if (el.tagName === 'CODE' || el.tagName === 'PRE' || el.closest('pre') || el.closest('code')) { return; }
+            applyDirection(el);
+        });
+
+        // Table cells inside responses
+        document.querySelectorAll('.leading-relaxed.select-text th, .leading-relaxed.select-text td').forEach(function (el) {
+            applyDirection(el);
+        });
+        document.querySelectorAll('.leading-relaxed.select-text table').forEach(function (el) {
+            if (isArabicOrMixed(el.textContent || '')) {
+                el.style.direction = 'rtl';
+            } else {
+                el.style.direction = 'ltr';
+            }
+        });
+
+        // Lexical input box (Antigravity uses contenteditable instead of Monaco)
+        document.querySelectorAll('[data-lexical-editor="true"]').forEach(function (editor) {
+            var text = editor.textContent || '';
+            var arabic = isArabicOrMixed(text);
+            editor.style.direction = arabic ? 'rtl' : 'ltr';
+            editor.style.textAlign = arabic ? 'right' : 'left';
+            if (arabic) {
+                editor.style.fontFamily = RTL_FONT_FAMILY;
+                editor.style.fontSize = RTL_FONT_SIZE;
+            } else {
+                editor.style.fontFamily = '';
+                editor.style.fontSize = '';
+            }
+        });
+    }
+
+    function scanAll() {
+        scanAllMarkdown();
+        scanAntigravity();
+    }
+
     function observeMarkdown() {
         var _mdScanTimeout = null;
         function scheduleMdScan() {
             if (_mdScanTimeout) return;
             _mdScanTimeout = setTimeout(function () {
                 _mdScanTimeout = null;
-                scanAllMarkdown();
+                scanAll();
             }, 200);
         }
 
@@ -125,7 +187,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             characterData: true,
         });
 
-        scanAllMarkdown();
+        scanAll();
     }
 
     if (document.readyState === 'loading') {
@@ -133,6 +195,24 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     } else {
         observeMarkdown();
     }
+
+    // Watch Lexical input changes directly (Antigravity)
+    document.addEventListener('input', function (e) {
+        var target = e.target;
+        if (target && target.getAttribute && target.getAttribute('data-lexical-editor') === 'true') {
+            var text = target.textContent || '';
+            var arabic = ARABIC_RE.test(text);
+            target.style.direction = arabic ? 'rtl' : 'ltr';
+            target.style.textAlign = arabic ? 'right' : 'left';
+            if (arabic) {
+                target.style.fontFamily = RTL_FONT_FAMILY;
+                target.style.fontSize = RTL_FONT_SIZE;
+            } else {
+                target.style.fontFamily = '';
+                target.style.fontSize = '';
+            }
+        }
+    }, true);
 
     // ── Input box direction ──────────────────────────────────────────────────
     var watchInputEditors = null;
@@ -252,7 +332,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     // ── Periodic fallback scan (handles lazy-loaded panels & class name changes) ──
     var _scanCount = 0;
     var _scanTimer = setInterval(function () {
-        scanAllMarkdown();
+        scanAll();
         if (AUTO_INPUT_DIR && watchInputEditors) { watchInputEditors(); }
         if (++_scanCount >= 20) { clearInterval(_scanTimer); }
     }, 3000);
