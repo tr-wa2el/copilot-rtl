@@ -5,47 +5,88 @@ import * as path from 'path';
 const MARKER_START = '<!-- COPILOT-RTL-PATCH-START -->';
 const MARKER_END = '<!-- COPILOT-RTL-PATCH-END -->';
 
-/**
- * The CSS/JS patch injected into workbench.desktop.main.html
- * Based on https://github.com/NabiKAZ/vscode-copilot-rtl
- */
-const PATCH_CONTENT = `${MARKER_START}
+function buildPatchContent(fontFamily: string, fontSize: number): string {
+    return `${MARKER_START}
 <script>
-/**
- * This script modifies the styling of various elements in a web page to support RTL (Right-to-Left) text direction
- * It applies RTL direction, Vazirmatn font family, and specific font sizes to interactive elements
- * Code blocks and result editors remain LTR (Left-to-Right) for proper code display
- * https://github.com/NabiKAZ/vscode-copilot-rtl
- */
 (function () {
     'use strict';
 
-    const css = \`
-/* COPILOT RTL PATCH */
-.rendered-markdown > *:not(div) {
-  direction: rtl !important;
-  font-family: vazirmatn !important;
-  font-size: 13px !important;
-}\`;
+    const RTL_FONT_FAMILY = ${JSON.stringify(fontFamily + ', sans-serif')};
+    const RTL_FONT_SIZE   = ${JSON.stringify(fontSize + 'px')};
 
-    function injectStyle() {
-        if (document.getElementById('copilot-rtl-style')) {
+    // Arabic Unicode blocks: Arabic, Arabic Supplement, Arabic Presentation Forms A & B
+    const ARABIC_RE = /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/;
+
+    function isArabicOrMixed(text) {
+        return ARABIC_RE.test(text);
+    }
+
+    function applyDirection(el) {
+        if (el.tagName === 'PRE' || el.tagName === 'CODE') {
+            el.style.direction = 'ltr';
+            el.style.fontFamily = '';
             return;
         }
-        const style = document.createElement('style');
-        style.id = 'copilot-rtl-style';
-        style.textContent = css;
-        (document.head || document.querySelector('head')).appendChild(style);
+        if (isArabicOrMixed(el.textContent || '')) {
+            el.style.direction = 'rtl';
+            el.style.fontFamily = RTL_FONT_FAMILY;
+            el.style.fontSize = RTL_FONT_SIZE;
+            el.style.textAlign = 'right';
+        } else {
+            el.style.direction = 'ltr';
+            el.style.fontFamily = '';
+            el.style.textAlign = '';
+        }
+    }
+
+    function processMarkdown(root) {
+        const children = root.querySelectorAll(
+            '.rendered-markdown > *:not(div), .rendered-markdown li'
+        );
+        children.forEach(applyDirection);
+    }
+
+    function observeMarkdown() {
+        const observer = new MutationObserver(function (mutations) {
+            mutations.forEach(function (mutation) {
+                mutation.addedNodes.forEach(function (node) {
+                    if (node.nodeType !== 1) { return; }
+                    const container = node.closest
+                        ? node.closest('.rendered-markdown')
+                        : null;
+                    if (container) {
+                        processMarkdown(container);
+                    } else {
+                        node.querySelectorAll && node
+                            .querySelectorAll('.rendered-markdown')
+                            .forEach(processMarkdown);
+                    }
+                });
+                if (mutation.type === 'characterData') {
+                    const el = mutation.target.parentElement;
+                    if (el) { applyDirection(el); }
+                }
+            });
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+        });
+
+        document.querySelectorAll('.rendered-markdown').forEach(processMarkdown);
     }
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', injectStyle);
+        document.addEventListener('DOMContentLoaded', observeMarkdown);
     } else {
-        injectStyle();
+        observeMarkdown();
     }
 })();
 </script>
 ${MARKER_END}`;
+}
 
 function getWorkbenchHtmlPath(): string | undefined {
     try {
@@ -77,25 +118,38 @@ function escapeForRegex(str: string): string {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function enablePatch(htmlPath: string): { success: boolean; error?: string } {
+function getSettings(): { fontFamily: string; fontSize: number } {
+    const cfg = vscode.workspace.getConfiguration('copilotRtl');
+    return {
+        fontFamily: cfg.get<string>('fontFamily', 'vazirmatn'),
+        fontSize: cfg.get<number>('fontSize', 13),
+    };
+}
+
+function enablePatch(htmlPath: string, fontFamily: string, fontSize: number): { success: boolean; error?: string } {
     try {
         let content = fs.readFileSync(htmlPath, 'utf8');
+        const patch = buildPatchContent(fontFamily, fontSize);
 
+        // Remove existing patch first (handles settings update)
         if (isPatched(content)) {
-            return { success: true };
-        }
-
-        // Create a backup before modifying
-        const backupPath = `${htmlPath}.bak-copilot-rtl`;
-        if (!fs.existsSync(backupPath)) {
-            fs.writeFileSync(backupPath, content, 'utf8');
-        }
-
-        // Inject the patch before </html>
-        if (content.includes('</html>')) {
-            content = content.replace('</html>', `${PATCH_CONTENT}\n</html>`);
+            const regex = new RegExp(
+                `\\n?${escapeForRegex(MARKER_START)}[\\s\\S]*?${escapeForRegex(MARKER_END)}\\n?`,
+                'g'
+            );
+            content = content.replace(regex, '');
         } else {
-            content += '\n' + PATCH_CONTENT;
+            // Create a backup only on first-time install
+            const backupPath = `${htmlPath}.bak-copilot-rtl`;
+            if (!fs.existsSync(backupPath)) {
+                fs.writeFileSync(backupPath, content, 'utf8');
+            }
+        }
+
+        if (content.includes('</html>')) {
+            content = content.replace('</html>', `${patch}\n</html>`);
+        } else {
+            content += '\n' + patch;
         }
 
         fs.writeFileSync(htmlPath, content, 'utf8');
@@ -145,7 +199,8 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
         }
 
-        const result = enablePatch(htmlPath);
+        const { fontFamily, fontSize } = getSettings();
+        const result = enablePatch(htmlPath, fontFamily, fontSize);
         if (result.success) {
             await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
         } else {
@@ -192,7 +247,21 @@ export function activate(context: vscode.ExtensionContext): void {
         }
     });
 
-    context.subscriptions.push(enableCmd, disableCmd, statusCmd);
+    // Re-apply patch automatically when the user changes font settings
+    const configListener = vscode.workspace.onDidChangeConfiguration(async (e) => {
+        if (!e.affectsConfiguration('copilotRtl')) { return; }
+        const htmlPath = getWorkbenchHtmlPath();
+        if (!htmlPath) { return; }
+        const content = fs.readFileSync(htmlPath, 'utf8');
+        if (!isPatched(content)) { return; }  // only update if already enabled
+        const { fontFamily, fontSize } = getSettings();
+        const result = enablePatch(htmlPath, fontFamily, fontSize);
+        if (result.success) {
+            await promptReload('Copilot RTL: Font settings updated. Reload VS Code to apply.');
+        }
+    });
+
+    context.subscriptions.push(enableCmd, disableCmd, statusCmd, configListener);
 }
 
 export function deactivate(): void {}

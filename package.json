@@ -17,6 +17,23 @@
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Copilot RTL",
+      "properties": {
+        "copilotRtl.fontFamily": {
+          "type": "string",
+          "default": "vazirmatn",
+          "description": "Font family for RTL Arabic text in Copilot chat (e.g. vazirmatn, Tahoma, Arial)"
+        },
+        "copilotRtl.fontSize": {
+          "type": "number",
+          "default": 13,
+          "minimum": 8,
+          "maximum": 40,
+          "description": "Font size in pixels for RTL Arabic text in Copilot chat"
+        }
+      }
+    },
     "commands": [
       {
         "command": "copilot-rtl.enable",
