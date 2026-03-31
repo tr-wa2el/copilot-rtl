@@ -1,0 +1,45 @@
+{
+  "name": "copilot-rtl",
+  "displayName": "Copilot RTL",
+  "description": "change the direction of copilot chat to right-to-left for Arabic",
+  "version": "0.1.0",
+  "publisher": "wael-abosamra",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tr-wa2el/copilot-rtl"
+  },
+  "keywords": ["rtl", "arabic", "persian", "copilot", "wael-abosamra"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copilot-rtl.enable",
+        "title": "Copilot RTL: Enable"
+      },
+      {
+        "command": "copilot-rtl.disable",
+        "title": "Copilot RTL: Disable"
+      },
+      {
+        "command": "copilot-rtl.status",
+        "title": "Copilot RTL: Show Status"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
