@@ -90,18 +90,30 @@ ${MARKER_END}`;
 
 function getWorkbenchHtmlPath(): string | undefined {
     try {
-        const execPath = process.execPath;
-        const baseDir = path.dirname(execPath);
+        // vscode.env.appRoot reliably points to the VS Code "resources/app" directory
+        const appRoot = vscode.env.appRoot;
+        const execDir = path.dirname(process.execPath);
 
-        const candidates = [
-            path.join(baseDir, 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.desktop.main.html'),
-            path.join(baseDir, '..', 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.desktop.main.html'),
+        const baseDirs = [
+            path.join(appRoot, 'out', 'vs', 'workbench'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'workbench'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'workbench'),
         ];
 
-        for (const candidate of candidates) {
-            const normalized = path.normalize(candidate);
-            if (fs.existsSync(normalized)) {
-                return normalized;
+        // Cover the legacy name, the ESM build name, and a plain fallback
+        const fileNames = [
+            'workbench.desktop.main.html',
+            'workbench.esm.html',
+            'workbench.desktop.esm.html',
+            'workbench.html',
+        ];
+
+        for (const base of baseDirs) {
+            for (const fileName of fileNames) {
+                const candidate = path.normalize(path.join(base, fileName));
+                if (fs.existsSync(candidate)) {
+                    return candidate;
+                }
             }
         }
     } catch {
@@ -232,7 +244,9 @@ export function activate(context: vscode.ExtensionContext): void {
     const statusCmd = vscode.commands.registerCommand('copilot-rtl.status', () => {
         const htmlPath = getWorkbenchHtmlPath();
         if (!htmlPath) {
-            vscode.window.showWarningMessage('Copilot RTL: Could not find workbench HTML file.');
+            vscode.window.showWarningMessage(
+                `Copilot RTL: Could not find workbench HTML file. appRoot=${vscode.env.appRoot}`
+            );
             return;
         }
 
