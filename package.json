@@ -58,6 +58,11 @@
           "minimum": 0,
           "maximum": 4,
           "description": "Line height for LTR English text in Copilot chat. Set to 0 to use VS Code default."
+        },
+        "copilotRtl.autoInputDirection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically switch the chat input box direction to RTL when Arabic text is detected, and back to LTR otherwise."
         }
       }
     },

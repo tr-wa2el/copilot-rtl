@@ -7,7 +7,7 @@ const MARKER_END = '<!-- COPILOT-RTL-PATCH-END -->';
 const PATCH_JS_NAME = 'copilot-rtl-patch.js';
 
 /** The JS that gets written to a standalone file (no inline script — avoids CSP). */
-function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): string {
+function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, autoInputDirection: boolean): string {
     return `(function () {
     'use strict';
 
@@ -18,6 +18,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     const LTR_FONT_FAMILY  = ${JSON.stringify(ltrFontFamily)};
     const LTR_FONT_SIZE    = ${JSON.stringify(ltrFontSize > 0 ? ltrFontSize + 'px' : '')};
     const LTR_LINE_HEIGHT  = ${JSON.stringify(ltrLineHeight > 0 ? String(ltrLineHeight) : '')};
+    const AUTO_INPUT_DIR   = ${autoInputDirection ? 'true' : 'false'};
 
     // Warn in DevTools console if the requested font is not available
     document.fonts.ready.then(function () {
@@ -102,7 +103,52 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     } else {
         observeMarkdown();
     }
-})();
+
+    // ── Input box direction ──────────────────────────────────────────────────
+    if (AUTO_INPUT_DIR) {
+        function applyInputDirection(editorEl) {
+            const lines = editorEl.querySelector('.view-lines');
+            const text = lines ? (lines.textContent || '') : '';
+            const isArabic = ARABIC_RE.test(text);
+            editorEl.style.direction = isArabic ? 'rtl' : 'ltr';
+            editorEl.style.textAlign = isArabic ? 'right' : '';
+            if (isArabic) {
+                editorEl.style.fontFamily = RTL_FONT_FAMILY;
+            } else {
+                editorEl.style.fontFamily = LTR_FONT_FAMILY;
+            }
+        }
+
+        function watchInputEditors() {
+            // Selectors covering different VS Code / Copilot chat versions
+            const selectors = [
+                '.interactive-input-editor .monaco-editor',
+                '.chat-input-part .monaco-editor',
+                '.aichat-input .monaco-editor',
+            ];
+            const editors = document.querySelectorAll(selectors.join(','));
+            editors.forEach(function (editor) {
+                if (editor.__rtlWatched) { return; }
+                editor.__rtlWatched = true;
+                applyInputDirection(editor);
+                const inputArea = editor.querySelector('.inputarea');
+                if (inputArea) {
+                    inputArea.addEventListener('input', function () {
+                        applyInputDirection(editor);
+                    });
+                    inputArea.addEventListener('compositionend', function () {
+                        applyInputDirection(editor);
+                    });
+                }
+            });
+        }
+
+        const inputObserver = new MutationObserver(function () {
+            watchInputEditors();
+        });
+        inputObserver.observe(document.body, { childList: true, subtree: true });
+        watchInputEditors();
+    }
 `;
 }
 
@@ -153,7 +199,7 @@ function escapeForRegex(str: string): string {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function getSettings(): { fontFamily: string; fontSize: number; lineHeight: number; ltrFontFamily: string; ltrFontSize: number; ltrLineHeight: number } {
+function getSettings(): { fontFamily: string; fontSize: number; lineHeight: number; ltrFontFamily: string; ltrFontSize: number; ltrLineHeight: number; autoInputDirection: boolean } {
     const cfg = vscode.workspace.getConfiguration('copilotRtl');
     return {
         fontFamily: cfg.get<string>('fontFamily', 'vazirmatn'),
@@ -162,16 +208,17 @@ function getSettings(): { fontFamily: string; fontSize: number; lineHeight: numb
         ltrFontFamily: cfg.get<string>('ltrFontFamily', ''),
         ltrFontSize: cfg.get<number>('ltrFontSize', 0),
         ltrLineHeight: cfg.get<number>('ltrLineHeight', 0),
+        autoInputDirection: cfg.get<boolean>('autoInputDirection', true),
     };
 }
 
-function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): { success: boolean; error?: string } {
+function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, autoInputDirection: boolean): { success: boolean; error?: string } {
     try {
         const htmlDir = path.dirname(htmlPath);
         const jsPath = path.join(htmlDir, PATCH_JS_NAME);
 
         // Always write/overwrite the JS file (updates font settings)
-        fs.writeFileSync(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+        fs.writeFileSync(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection), 'utf8');
 
         let content = fs.readFileSync(htmlPath, 'utf8');
         const version = Date.now();
@@ -249,8 +296,8 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
         }
 
-        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection } = getSettings();
+        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection);
         if (result.success) {
             await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
         } else {
@@ -306,8 +353,8 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!htmlPath) { return; }
         const content = fs.readFileSync(htmlPath, 'utf8');
         if (!isPatched(content)) { return; }  // only update if already enabled
-        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection } = getSettings();
+        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection);
         if (result.success) {
             await promptReload('Copilot RTL: Font settings updated. Reload VS Code to apply.');
         }
