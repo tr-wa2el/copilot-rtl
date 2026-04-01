@@ -147,24 +147,22 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             }
         });
 
-        // Lexical input box (Antigravity uses contenteditable instead of Monaco)
+    }
+
+    // ── Input scan (called ONLY on user input events, never from MutationObserver) ──
+    // Keeping this separate prevents the AI streaming response from triggering
+    // input re-scans, which caused direction/font to flicker on every streamed token.
+    function scanAntigravityInput() {
         document.querySelectorAll('[data-lexical-editor="true"]').forEach(function (editor) {
             var text = editor.textContent || '';
             var arabic = isArabicOrMixed(text);
-            
-            // Remove hardcoded direction/textAlign from the parent container
             editor.style.direction = '';
             editor.style.textAlign = '';
-            
             if (arabic) {
-                editor.style.fontFamily = RTL_FONT_FAMILY;
-                editor.style.fontSize = RTL_FONT_SIZE;
+                editor.classList.add('copilot-rtl-lexical');
             } else {
-                editor.style.fontFamily = '';
-                editor.style.fontSize = '';
+                editor.classList.remove('copilot-rtl-lexical');
             }
-
-            // Apply direction per paragraph so each has its own alignment
             var children = editor.children;
             for (var i = 0; i < children.length; i++) {
                 applyDirection(children[i]);
@@ -207,26 +205,8 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     // Watch Lexical input changes directly (Antigravity)
     document.addEventListener('input', function (e) {
         var target = e.target;
-        var editor = target && target.closest ? target.closest('[data-lexical-editor="true"]') : null;
-        if (editor) {
-            var text = editor.textContent || '';
-            var arabic = ARABIC_RE.test(text);
-            
-            editor.style.direction = '';
-            editor.style.textAlign = '';
-            
-            if (arabic) {
-                editor.style.fontFamily = RTL_FONT_FAMILY;
-                editor.style.fontSize = RTL_FONT_SIZE;
-            } else {
-                editor.style.fontFamily = '';
-                editor.style.fontSize = '';
-            }
-
-            var children = editor.children;
-            for (var i = 0; i < children.length; i++) {
-                applyDirection(children[i]);
-            }
+        if (target && target.closest && target.closest('[data-lexical-editor="true"]')) {
+            scanAntigravityInput();
         }
     }, true);
 
@@ -251,11 +231,19 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
         // Apply direction to the native input surface so the browser positions its own
         // cursor (caret) correctly inside the EditContext / contenteditable area.
-        css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; }';
-        css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; }';
+        // font-size on native-edit-context and inputarea is safe — they are hidden input
+        // surfaces, not the rendered view, so they do not affect Monaco's layout metrics.
+        css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '.copilot-rtl-v2 .mtk1 { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
+        // Lexical input — class applied when Arabic detected; !important overrides VS Code stylesheet rules
+        css += '[data-lexical-editor="true"].copilot-rtl-lexical { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '[data-lexical-editor="true"].copilot-rtl-lexical > p { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '[data-lexical-editor="true"].copilot-rtl-lexical span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
         style.textContent = css;
         document.head.appendChild(style);
     }
+
     injectStyles();
 
     // ── Monaco-based chat input RTL support ──────────────────────────────
@@ -301,23 +289,22 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         }
     }
 
-    // Run non-code Monaco scan inside the main scan cycle
+    // Run non-code Monaco scan inside the main scan cycle.
+    // NOTE: processNonCodeMonacos is intentionally NOT added to the MutationObserver
+    // scanAll cycle — doing so caused the chat input to flicker between LTR/RTL on
+    // every token streamed by the AI. Input detection happens via the 'input' event
+    // and the periodic fallback scan instead.
     var origScanAll = scanAll;
     scanAll = function () {
         origScanAll();
-        processNonCodeMonacos();
     };
 
-    // Use a lightweight event listener for typing
+    // Use a lightweight event listener for typing (Monaco input)
     document.addEventListener('input', function (e) {
         var target = e.target;
         if (!target || !target.closest) return;
         var monacoParent = target.closest('.monaco-editor');
         if (monacoParent && !isMainCodeEditor(monacoParent)) {
-            // If the editor is already in RTL mode, do not re-evaluate on every
-            // keystroke — the mutation-observer debounce will handle steady-state
-            // checks. This prevents removing-then-re-adding the class mid-render
-            // (the other half of the per-char flicker).
             if (!monacoParent.classList.contains('copilot-rtl-v2')) {
                 processNonCodeMonacos();
             }
@@ -325,11 +312,18 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     }, true);
 
     // ── Periodic fallback scan ──
+    // Includes input detection so initial state is picked up even before the user types.
     var _scanCount = 0;
     var _scanTimer = setInterval(function () {
         scanAll();
+        processNonCodeMonacos();
+        scanAntigravityInput();
         if (++_scanCount >= 30) clearInterval(_scanTimer);
     }, 2000);
+
+    // Initial input detection on load
+    processNonCodeMonacos();
+    scanAntigravityInput();
 
 }());
 `;
@@ -413,22 +407,37 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         });
     }
 
+    // ── CSS injection for Lexical input font (agent panel) ─────────────
+    function injectAgentStyles() {
+        if (document.getElementById('copilot-rtl-agent-styles')) return;
+        var style = document.createElement('style');
+        style.id = 'copilot-rtl-agent-styles';
+        var css = '';
+        css += '[data-lexical-editor="true"].copilot-rtl-lexical { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '[data-lexical-editor="true"].copilot-rtl-lexical > p { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '[data-lexical-editor="true"].copilot-rtl-lexical span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+        style.textContent = css;
+        document.head.appendChild(style);
+    }
+    injectAgentStyles();
+
     // ── Input box (Lexical contenteditable) ──────────────────────────────
+    // Called ONLY from user input events — never from the MutationObserver —
+    // to prevent flickering while the AI streams its response.
     function processInput() {
         var editors = document.querySelectorAll('[data-lexical-editor="true"]');
         editors.forEach(function (editor) {
             var text = editor.textContent || '';
             var arabic = isArabic(text);
-            
+
             editor.style.direction = '';
             editor.style.textAlign = '';
-            
+
+            // Use CSS class so !important overrides VS Code's own stylesheet rules
             if (arabic) {
-                editor.style.fontFamily = RTL_FONT_FAMILY;
-                editor.style.fontSize = RTL_FONT_SIZE;
+                editor.classList.add('copilot-rtl-lexical');
             } else {
-                editor.style.fontFamily = '';
-                editor.style.fontSize = '';
+                editor.classList.remove('copilot-rtl-lexical');
             }
 
             var children = editor.children;
@@ -447,8 +456,9 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         if (_scanTimeout) { return; }
         _scanTimeout = setTimeout(function () {
             _scanTimeout = null;
+            // Only scan AI responses — NOT processInput() — to prevent flickering
+            // caused by direction/font toggling on each streamed token from the AI.
             processMessages();
-            processInput();
         }, 200);
     }
 
@@ -459,8 +469,8 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
             subtree: true,
             characterData: true,
         });
+        // Only scan responses here; input is handled by 'input' events
         processMessages();
-        processInput();
     }
 
     // Also watch input changes directly
@@ -484,12 +494,16 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
     }
 
     // Periodic fallback for lazy-loaded content
+    // processInput() is included here (not in the observer) to pick up initial state.
     var _count = 0;
     var _timer = setInterval(function () {
         processMessages();
         processInput();
         if (++_count >= 20) { clearInterval(_timer); }
     }, 3000);
+
+    // Initial input detection on load
+    processInput();
 
 }());
 `;
