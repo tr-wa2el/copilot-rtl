@@ -320,16 +320,11 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
-        // ──────── Class-based RTL (secondary reinforcement) ───────────
+        // ──────── Class-based RTL (container only) ──────────────────
+        // Only set direction on the CONTAINER for list markers, ol counters, etc.
+        // Do NOT set direction on children (p, li, h1-h6) — that would override
+        // unicode-bidi:plaintext and force English paragraphs to RTL.
         css += '.copilot-rtl-response { direction: rtl !important; }';
-        css += '.copilot-rtl-response p, .copilot-rtl-response li, ';
-        css += '.copilot-rtl-response h1, .copilot-rtl-response h2, ';
-        css += '.copilot-rtl-response h3, .copilot-rtl-response h4, ';
-        css += '.copilot-rtl-response h5, .copilot-rtl-response h6 { ';
-        css += 'direction: rtl !important; text-align: right !important; ';
-        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
-        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
-        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
@@ -535,16 +530,8 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
-        // Class-based reinforcement (secondary)
+        // Class-based RTL (container only — no child direction override)
         css += '.copilot-rtl-response { direction: rtl !important; }';
-        css += '.copilot-rtl-response p, .copilot-rtl-response li, ';
-        css += '.copilot-rtl-response h1, .copilot-rtl-response h2, ';
-        css += '.copilot-rtl-response h3, .copilot-rtl-response h4, ';
-        css += '.copilot-rtl-response h5, .copilot-rtl-response h6 { ';
-        css += 'direction: rtl !important; text-align: right !important; ';
-        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
-        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
-        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
@@ -957,6 +944,79 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
     }
 
+    // ── Status bar toggle button ─────────────────────────────────────────────
+    const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'copilot-rtl.toggle';
+    statusBarItem.tooltip = 'Click to toggle Copilot RTL on/off';
+    statusBarItem.show();
+
+    async function updateStatusBar(): Promise<void> {
+        const hp = getWorkbenchHtmlPath();
+        if (!hp) {
+            statusBarItem.text = '$(globe) RTL ❌';
+            return;
+        }
+        try {
+            const content = await fsp.readFile(hp, 'utf8');
+            if (isPatched(content)) {
+                statusBarItem.text = '$(globe) RTL ✅';
+                statusBarItem.backgroundColor = undefined;
+            } else {
+                statusBarItem.text = '$(globe) RTL ❌';
+                statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+            }
+        } catch {
+            statusBarItem.text = '$(globe) RTL ⚠️';
+        }
+    }
+
+    // Set initial status
+    updateStatusBar();
+
+    // ── Toggle command ──────────────────────────────────────────────────────
+    const toggleCmd = vscode.commands.registerCommand('copilot-rtl.toggle', async () => {
+        const htmlPath = getWorkbenchHtmlPath();
+        if (!htmlPath) {
+            vscode.window.showErrorMessage(
+                'Copilot RTL: Could not locate the VS Code workbench HTML file.'
+            );
+            return;
+        }
+
+        try {
+            const content = await fsp.readFile(htmlPath, 'utf8');
+            const currentlyEnabled = isPatched(content);
+
+            if (currentlyEnabled) {
+                // Disable
+                const result = await disablePatch(htmlPath);
+                if (result.success) {
+                    await updateStatusBar();
+                    await promptReload('Copilot RTL disabled. Reload VS Code to apply changes.');
+                } else {
+                    vscode.window.showErrorMessage(
+                        `Copilot RTL: Failed to disable — ${result.error}. Try running VS Code as Administrator.`
+                    );
+                }
+            } else {
+                // Enable
+                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
+                const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+                if (result.success) {
+                    await updateStatusBar();
+                    await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
+                } else {
+                    vscode.window.showErrorMessage(
+                        `Copilot RTL: Failed to enable — ${result.error}. Try running VS Code as Administrator.`
+                    );
+                }
+            }
+        } catch {
+            vscode.window.showErrorMessage('Copilot RTL: Could not read workbench HTML file.');
+        }
+    });
+
+    // ── Enable command ──────────────────────────────────────────────────────
     const enableCmd = vscode.commands.registerCommand('copilot-rtl.enable', async () => {
         const htmlPath = getWorkbenchHtmlPath();
         if (!htmlPath) {
@@ -969,6 +1029,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
         const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
         if (result.success) {
+            await updateStatusBar();
             await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
         } else {
             vscode.window.showErrorMessage(
@@ -977,6 +1038,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
     });
 
+    // ── Disable command ─────────────────────────────────────────────────────
     const disableCmd = vscode.commands.registerCommand('copilot-rtl.disable', async () => {
         const htmlPath = getWorkbenchHtmlPath();
         if (!htmlPath) {
@@ -988,6 +1050,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
         const result = await disablePatch(htmlPath);
         if (result.success) {
+            await updateStatusBar();
             await promptReload('Copilot RTL disabled. Reload VS Code to apply changes.');
         } else {
             vscode.window.showErrorMessage(
@@ -996,6 +1059,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
     });
 
+    // ── Status command ──────────────────────────────────────────────────────
     const statusCmd = vscode.commands.registerCommand('copilot-rtl.status', async () => {
         const htmlPath = getWorkbenchHtmlPath();
         if (!htmlPath) {
@@ -1028,11 +1092,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
         const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
         if (result.success) {
+            await updateStatusBar();
             await promptReload('Copilot RTL: Settings updated. Reload to apply.');
         }
     });
 
-    context.subscriptions.push(enableCmd, disableCmd, statusCmd, configListener);
+    context.subscriptions.push(toggleCmd, enableCmd, disableCmd, statusCmd, statusBarItem, configListener);
 }
 
 export function deactivate(): void { }

@@ -76,6 +76,10 @@
         "title": "Copilot RTL: Disable"
       },
       {
+        "command": "copilot-rtl.toggle",
+        "title": "Copilot RTL: Toggle On/Off"
+      },
+      {
         "command": "copilot-rtl.status",
         "title": "Copilot RTL: Show Status"
       }
