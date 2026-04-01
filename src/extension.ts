@@ -171,49 +171,10 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             }
         });
     }
-        // ── Smart Cursor Direction (Monaco) 🧠 ──────────────────────
-    function detectDirectionNearCursor(lineEl) {
-        var selection = window.getSelection();
-        if (!selection || selection.rangeCount === 0) return null;
-
-        var range = selection.getRangeAt(0);
-        var node = range.startContainer;
-
-        if (!lineEl.contains(node)) return null;
-
-        var text = lineEl.textContent || '';
-        var offset = range.startOffset;
-
-        // خد جزء حوالين الكيرسر
-        var before = text.slice(Math.max(0, offset - 10), offset);
-        var after  = text.slice(offset, offset + 10);
-        var sample = before + after;
-
-        if (ARABIC_RE.test(sample)) return 'rtl';
-        return 'ltr';
-    }
-
-    function scanMonacoCursorAware() {
-        document.querySelectorAll('.monaco-editor .view-line').forEach(function (el) {
-            var dir = detectDirectionNearCursor(el);
-            if (!dir) return;
-
-            if (dir === 'rtl') {
-                el.setAttribute('dir', 'rtl');
-                el.style.direction = 'rtl';
-                el.style.textAlign = 'right';
-            } else {
-                el.setAttribute('dir', 'ltr');
-                el.style.direction = 'ltr';
-                el.style.textAlign = 'left';
-            }
-        });
-    }
 
     function scanAll() {
         scanAllMarkdown();
         scanAntigravity();
-        scanMonacoCursorAware();
     }
 
     function observeMarkdown() {
@@ -243,10 +204,6 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         observeMarkdown();
     }
 
-    // ── Smart cursor-aware direction on keyup & click ──
-    document.addEventListener('keyup', scanMonacoCursorAware, true);
-    document.addEventListener('click', scanMonacoCursorAware, true);
-
     // Watch Lexical input changes directly (Antigravity)
     document.addEventListener('input', function (e) {
         var target = e.target;
@@ -269,6 +226,100 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             var children = editor.children;
             for (var i = 0; i < children.length; i++) {
                 applyDirection(children[i]);
+            }
+        }
+    }, true);
+
+    // ── CSS Injection for Monaco & Chat ─────────────────────────────────
+    function injectStyles() {
+        if (document.getElementById('copilot-rtl-styles')) return;
+        var style = document.createElement('style');
+        style.id = 'copilot-rtl-styles';
+        // Use string concatenation to avoid TS template literal confusion with generated code variables
+        var css = '';
+        // Do NOT set direction:rtl on the .monaco-editor container itself!
+        // Monaco uses a ~16M px wide .lines-content element for virtual scrolling.
+        // Setting direction:rtl on an ancestor causes absolutely-positioned children
+        // (like .view-lines) to snap to the RIGHT edge of that huge container,
+        // pushing text completely off-screen.  Direction is applied only to the
+        // specific text-rendering children below.
+        // Do NOT override font-family/font-size on .view-lines — Monaco uses its own font
+        // metrics (measured at startup) to calculate cursor pixel position. Changing the
+        // CSS font without updating Monaco's measurement cache causes the cursor to drift
+        // away from the actual text insertion point.
+        css += '.copilot-rtl-v2 .view-lines { unicode-bidi: plaintext !important; }';
+        css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
+        // Apply direction to the native input surface so the browser positions its own
+        // cursor (caret) correctly inside the EditContext / contenteditable area.
+        css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; }';
+        css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; }';
+        style.textContent = css;
+        document.head.appendChild(style);
+    }
+    injectStyles();
+
+    // ── Monaco-based chat input RTL support ──────────────────────────────
+    var CODE_EDITOR_ANCESTORS = [
+        '.editor-group-container',
+        '.editor-instance',
+        '.monaco-workbench .part.editor',
+    ];
+
+    function isMainCodeEditor(monacoEl) {
+        if (!monacoEl || !monacoEl.closest) { return false; }
+        for (var i = 0; i < CODE_EDITOR_ANCESTORS.length; i++) {
+            if (monacoEl.closest(CODE_EDITOR_ANCESTORS[i])) return true;
+        }
+        return false;
+    }
+
+    function processNonCodeMonacos() {
+        var allMonacos = document.querySelectorAll('.monaco-editor');
+        for (var m = 0; m < allMonacos.length; m++) {
+            var editor = allMonacos[m];
+            if (isMainCodeEditor(editor)) continue;
+
+            var text = editor.textContent || '';
+
+            // Monaco removes then re-adds .view-line elements on every keystroke.
+            // During the brief DOM gap the textContent reads as empty/non-Arabic,
+            // which would remove the RTL class and cause a visible per-char flicker.
+            // Guard: if the editor is already in RTL mode and the text is momentarily
+            // empty, keep the current state instead of toggling.
+            if (!text.trim() && editor.classList.contains('copilot-rtl-v2')) {
+                continue;
+            }
+
+            var arabic = isArabicOrMixed(text);
+
+            // Toggle the class on the editor container
+            if (arabic) {
+                editor.classList.add('copilot-rtl-v2');
+            } else {
+                editor.classList.remove('copilot-rtl-v2');
+            }
+        }
+    }
+
+    // Run non-code Monaco scan inside the main scan cycle
+    var origScanAll = scanAll;
+    scanAll = function () {
+        origScanAll();
+        processNonCodeMonacos();
+    };
+
+    // Use a lightweight event listener for typing
+    document.addEventListener('input', function (e) {
+        var target = e.target;
+        if (!target || !target.closest) return;
+        var monacoParent = target.closest('.monaco-editor');
+        if (monacoParent && !isMainCodeEditor(monacoParent)) {
+            // If the editor is already in RTL mode, do not re-evaluate on every
+            // keystroke — the mutation-observer debounce will handle steady-state
+            // checks. This prevents removing-then-re-adding the class mid-render
+            // (the other half of the per-char flicker).
+            if (!monacoParent.classList.contains('copilot-rtl-v2')) {
+                processNonCodeMonacos();
             }
         }
     }, true);
