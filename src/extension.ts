@@ -7,6 +7,7 @@ const MARKER_START = '<!-- COPILOT-RTL-PATCH-START -->';
 const MARKER_END = '<!-- COPILOT-RTL-PATCH-END -->';
 const PATCH_JS_NAME = 'copilot-rtl-patch.js';
 const AGENT_PATCH_JS_NAME = 'copilot-rtl-agent-patch.js';
+const STATE_KEY_DISABLED = 'copilotRtl.userDisabled';
 
 /** The JS that gets written to a standalone file (no inline script — avoids CSP). */
 function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): string {
@@ -47,6 +48,8 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         '.copilot-chat-response .rendered-markdown',
         '.chat-tree-item-contents .rendered-markdown',
         '.chat-list-item-layout .rendered-markdown',
+        // Cursor IDE chat containers
+        '.markdown-root .space-y-4',
     ];
 
     function isArabicOrMixed(text) {
@@ -141,43 +144,56 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         }, 800);
     }
 
-    // ── Antigravity chat support (React + Tailwind + Lexical) ──────────
+    // ── Antigravity / Cursor chat support (React + Tailwind + Lexical) ──
     // Uses the CSS-class approach: add 'copilot-rtl-response' to the
     // STABLE container so children are styled via CSS, not inline styles.
+    // Selectors cover both Antigravity (.leading-relaxed.select-text)
+    // and Cursor IDE (.markdown-root .space-y-4).
+    var RESPONSE_CONTAINER_SELECTORS = [
+        '.leading-relaxed.select-text',
+        '.markdown-root .space-y-4',
+    ];
+
     function scanAntigravity() {
         // Bot response CONTAINERS — add class, let CSS handle children
-        document.querySelectorAll('.leading-relaxed.select-text').forEach(function (container) {
-            var containerArabic = isArabicOrMixed(container.textContent || '');
+        RESPONSE_CONTAINER_SELECTORS.forEach(function (sel) {
+            document.querySelectorAll(sel).forEach(function (container) {
+                var containerArabic = isArabicOrMixed(container.textContent || '');
 
-            // Lock the container as soon as Arabic is detected
-            if (containerArabic) {
-                container.classList.add('copilot-rtl-response');
-            }
+                // Lock the container as soon as Arabic is detected
+                if (containerArabic) {
+                    container.classList.add('copilot-rtl-response');
+                }
 
-            // If locked and streaming, skip ALL child processing
-            if (container.classList.contains('copilot-rtl-response') && _isStreaming) {
-                return;
-            }
+                // If locked and streaming, skip ALL child processing
+                if (container.classList.contains('copilot-rtl-response') && _isStreaming) {
+                    return;
+                }
 
-            // Non-streaming: allow removal
-            if (!containerArabic) {
-                container.classList.remove('copilot-rtl-response');
-            }
+                // Non-streaming: allow removal
+                if (!containerArabic) {
+                    container.classList.remove('copilot-rtl-response');
+                }
+            });
         });
 
         // User messages (skip code/pre and Lexical editors)
-        document.querySelectorAll('.whitespace-pre-wrap').forEach(function (el) {
+        document.querySelectorAll('.whitespace-pre-wrap, .whitespace-normal').forEach(function (el) {
             if (el.tagName === 'CODE' || el.tagName === 'PRE' || el.closest('pre') || el.closest('code')) { return; }
             if (el.closest('[data-lexical-editor="true"]')) { return; }
+            // Skip containers already handled as response containers
+            if (el.closest('.markdown-root')) { return; }
             applyDirection(el);
         });
 
         // Table cells — only process when not streaming
         if (!_isStreaming) {
-            document.querySelectorAll('.leading-relaxed.select-text th, .leading-relaxed.select-text td').forEach(function (el) {
+            var tableCellSel = RESPONSE_CONTAINER_SELECTORS.map(function(s) { return s + ' th, ' + s + ' td'; }).join(', ');
+            document.querySelectorAll(tableCellSel).forEach(function (el) {
                 applyDirection(el);
             });
-            document.querySelectorAll('.leading-relaxed.select-text table').forEach(function (el) {
+            var tableSel = RESPONSE_CONTAINER_SELECTORS.map(function(s) { return s + ' table'; }).join(', ');
+            document.querySelectorAll(tableSel).forEach(function (el) {
                 if (isArabicOrMixed(el.textContent || '')) {
                     el.style.direction = 'rtl';
                 } else {
@@ -287,12 +303,21 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         // unicode-bidi:plaintext makes the browser auto-detect direction
         // per paragraph from the first strong character (Arabic=RTL, Latin=LTR).
 
-        // Antigravity response containers
-        css += '.leading-relaxed.select-text p, .leading-relaxed.select-text li, ';
-        css += '.leading-relaxed.select-text h1, .leading-relaxed.select-text h2, ';
-        css += '.leading-relaxed.select-text h3, .leading-relaxed.select-text h4, ';
-        css += '.leading-relaxed.select-text h5, .leading-relaxed.select-text h6 { ';
+        // Antigravity + Cursor response containers
+        var respTags = ['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
+        var respContainerSels = ['.leading-relaxed.select-text', '.markdown-root .space-y-4'];
+        var respCssSels = [];
+        respContainerSels.forEach(function(c) {
+            respTags.forEach(function(t) { respCssSels.push(c + ' ' + t); });
+        });
+        css += respCssSels.join(', ') + ' { ';
         css += 'unicode-bidi: plaintext !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        // Also style inline spans inside responses (Cursor uses <span class="font-semibold">)
+        var respSpanSels = respContainerSels.map(function(c) { return c + ' span'; }).join(', ');
+        css += respSpanSels + ' { ';
         css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
         css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
         css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
@@ -308,7 +333,9 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
 
         // Code blocks must ALWAYS stay LTR regardless
-        css += '.leading-relaxed.select-text pre, .leading-relaxed.select-text code { ';
+        var respCodeSels = [];
+        respContainerSels.forEach(function(c) { respCodeSels.push(c + ' pre', c + ' code', c + ' pre span', c + ' code span'); });
+        css += respCodeSels.join(', ') + ' { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
@@ -338,10 +365,29 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
         css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
 
-        // ──────── Lexical input ──────────────────────────────────────────
+        // ──────── Lexical input (class-based, toggled by JS) ────────────────
         css += '[data-lexical-editor="true"].copilot-rtl-lexical { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '[data-lexical-editor="true"].copilot-rtl-lexical > p { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '[data-lexical-editor="true"].copilot-rtl-lexical span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+
+        // ──────── Cursor user messages (CSS-only, no JS needed) ──────────
+        // Sent user messages in Cursor become readonly Lexical editors.
+        // Use unicode-bidi:plaintext so the browser auto-detects direction
+        // from text content — no JS class toggle needed.
+        css += '.composer-human-message [data-lexical-editor] p, ';
+        css += '.composer-human-message [data-lexical-editor] span[data-lexical-text] { ';
+        css += 'unicode-bidi: plaintext !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        // Cursor readonly Lexical editors (covers all sent messages)
+        css += '.aislash-editor-input-readonly p, ';
+        css += '.aislash-editor-input-readonly span[data-lexical-text] { ';
+        css += 'unicode-bidi: plaintext !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+
         style.textContent = css;
         document.head.appendChild(style);
     }
@@ -683,8 +729,12 @@ function getAgentHtmlPath(): string | undefined {
 
         const candidates: string[] = [
             path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
+            // Cursor uses electron-sandbox instead of electron-browser
+            path.join(appRoot, 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench-jetski-agent.html'),
             path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench-jetski-agent.html'),
             path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench-jetski-agent.html'),
         ];
 
         for (const candidate of candidates) {
@@ -709,6 +759,8 @@ function getWorkbenchHtmlPath(): string | undefined {
         const candidates: [string, string][] = [
             // VS Code 1.90+ (electron-browser layout, just "workbench.html")
             [path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench'), 'workbench.html'],
+            // Cursor IDE (electron-sandbox layout)
+            [path.join(appRoot, 'out', 'vs', 'code', 'electron-sandbox', 'workbench'), 'workbench.html'],
             // Older layouts that used workbench.desktop.main.html
             [path.join(appRoot, 'out', 'vs', 'workbench'), 'workbench.desktop.main.html'],
             [path.join(appRoot, 'out', 'vs', 'workbench'), 'workbench.esm.html'],
@@ -716,8 +768,10 @@ function getWorkbenchHtmlPath(): string | undefined {
             [path.join(appRoot, 'out', 'vs', 'workbench'), 'workbench.html'],
             // Fallbacks via process.execPath
             [path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench'), 'workbench.html'],
+            [path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench'), 'workbench.html'],
             [path.join(execDir, 'resources', 'app', 'out', 'vs', 'workbench'), 'workbench.desktop.main.html'],
             [path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench'), 'workbench.html'],
+            [path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench'), 'workbench.html'],
             [path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'workbench'), 'workbench.desktop.main.html'],
         ];
 
@@ -897,46 +951,31 @@ async function promptReload(message: string): Promise<void> {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+    const userDisabled = context.globalState.get<boolean>(STATE_KEY_DISABLED, false);
+
     // ── Auto-enable on first activation ──────────────────────────────────────
     const htmlPath = getWorkbenchHtmlPath();
     if (htmlPath) {
         try {
             const content = await fsp.readFile(htmlPath, 'utf8');
             if (!isPatched(content)) {
-                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-                const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
-                if (result.success) {
-                    promptReload('Copilot RTL installed and enabled automatically. Reload to apply.');
+                // Only auto-enable if the user hasn't explicitly disabled it
+                if (!userDisabled) {
+                    const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
+                    const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+                    if (result.success) {
+                        promptReload('Copilot RTL installed and enabled automatically. Reload to apply.');
+                    }
                 }
             } else {
-                // Already patched — always rewrite the JS file so extension updates take effect
-                // without requiring the user to disable then re-enable the extension manually.
+                // Already patched — fully re-patch (HTML + JS) so extension updates
+                // take effect. enablePatch() removes the old patch and adds a new one
+                // with a fresh ?v=timestamp, ensuring the browser loads the latest JS.
                 const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
                 try {
-                    const htmlDir = path.dirname(htmlPath);
-                    const jsPath = path.join(htmlDir, PATCH_JS_NAME);
-                    await fsp.writeFile(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+                    await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
                 } catch {
                     // ignore — user can still use the manual enable command
-                }
-
-                // Also make sure agent panel is patched and up to date
-                const agentPath = getAgentHtmlPath();
-                if (agentPath) {
-                    try {
-                        const agentContent = await fsp.readFile(agentPath, 'utf8');
-                        if (!isPatched(agentContent)) {
-                            await enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
-                            promptReload('Copilot RTL: Antigravity chat panel patched. Reload to apply.');
-                        } else {
-                            // Rewrite agent JS too
-                            const agentDir = path.dirname(agentPath);
-                            const agentJsPath = path.join(agentDir, AGENT_PATCH_JS_NAME);
-                            await fsp.writeFile(agentJsPath, buildAgentScriptContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
-                        }
-                    } catch {
-                        // ignore
-                    }
                 }
             }
         } catch {
@@ -991,6 +1030,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 // Disable
                 const result = await disablePatch(htmlPath);
                 if (result.success) {
+                    await context.globalState.update(STATE_KEY_DISABLED, true);
                     await updateStatusBar();
                     await promptReload('Copilot RTL disabled. Reload VS Code to apply changes.');
                 } else {
@@ -1003,6 +1043,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
                 const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
                 if (result.success) {
+                    await context.globalState.update(STATE_KEY_DISABLED, false);
                     await updateStatusBar();
                     await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
                 } else {
@@ -1029,6 +1070,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
         const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
         if (result.success) {
+            await context.globalState.update(STATE_KEY_DISABLED, false);
             await updateStatusBar();
             await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
         } else {
@@ -1050,6 +1092,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
         const result = await disablePatch(htmlPath);
         if (result.success) {
+            await context.globalState.update(STATE_KEY_DISABLED, true);
             await updateStatusBar();
             await promptReload('Copilot RTL disabled. Reload VS Code to apply changes.');
         } else {
