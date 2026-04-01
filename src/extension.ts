@@ -8,7 +8,7 @@ const PATCH_JS_NAME = 'copilot-rtl-patch.js';
 const AGENT_PATCH_JS_NAME = 'copilot-rtl-agent-patch.js';
 
 /** The JS that gets written to a standalone file (no inline script — avoids CSP). */
-function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, autoInputDirection: boolean): string {
+function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): string {
     return `(function () {
     'use strict';
 
@@ -19,7 +19,6 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     const LTR_FONT_FAMILY  = ${JSON.stringify(ltrFontFamily)};
     const LTR_FONT_SIZE    = ${JSON.stringify(ltrFontSize > 0 ? ltrFontSize + 'px' : '')};
     const LTR_LINE_HEIGHT  = ${JSON.stringify(ltrLineHeight > 0 ? String(ltrLineHeight) : '')};
-    const AUTO_INPUT_DIR   = ${autoInputDirection ? 'true' : 'false'};
 
     // Warn in DevTools console if the requested font is not available
     document.fonts.ready.then(function () {
@@ -214,128 +213,101 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         }
     }, true);
 
-    // ── Input box direction ──────────────────────────────────────────────────
-    var watchInputEditors = null;
+    // ── CSS Injection for Monaco & Chat ─────────────────────────────────
+    function injectStyles() {
+        if (document.getElementById('copilot-rtl-styles')) return;
+        var style = document.createElement('style');
+        style.id = 'copilot-rtl-styles';
+        // Use string concatenation to avoid TS template literal confusion with generated code variables
+        var css = '';
+        css += '.copilot-rtl-v2 { direction: rtl !important; text-align: right !important; }';
+        // Do NOT override font-family/font-size on .view-lines — Monaco uses its own font
+        // metrics (measured at startup) to calculate cursor pixel position. Changing the
+        // CSS font without updating Monaco's measurement cache causes the cursor to drift
+        // away from the actual text insertion point.
+        css += '.copilot-rtl-v2 .view-lines { unicode-bidi: plaintext !important; }';
+        css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
+        // Apply direction to the native input surface so the browser positions its own
+        // cursor (caret) correctly inside the EditContext / contenteditable area.
+        css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; }';
+        css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; }';
+        style.textContent = css;
+        document.head.appendChild(style);
+    }
+    injectStyles();
 
-    if (AUTO_INPUT_DIR) {
-        function applyInputDirection(editorEl, observer) {
-            if (observer) { observer.disconnect(); }
+    // ── Monaco-based chat input RTL support ──────────────────────────────
+    var CODE_EDITOR_ANCESTORS = [
+        '.editor-group-container',
+        '.editor-instance',
+        '.monaco-workbench .part.editor',
+    ];
 
-            var linesContainer = editorEl.querySelector('.view-lines');
-            var text = linesContainer ? (linesContainer.textContent || '') : '';
-            var isArabic = ARABIC_RE.test(text);
-            var dir = isArabic ? 'rtl' : 'ltr';
-
-            // 1. The Monaco editor wrapper
-            editorEl.style.direction = dir;
-            editorEl.style.textAlign = isArabic ? 'right' : '';
-            editorEl.style.fontFamily = isArabic ? RTL_FONT_FAMILY : LTR_FONT_FAMILY;
-
-            // 2. The actual textarea (.inputarea) — controls cursor position & IME
-            var inputArea = editorEl.querySelector('.inputarea');
-            if (inputArea) {
-                inputArea.style.direction = dir;
-            }
-
-            // 3. The .view-lines container
-            if (linesContainer && linesContainer.style) {
-                linesContainer.style.direction = dir;
-                if (isArabic) {
-                    linesContainer.style.fontFamily = RTL_FONT_FAMILY;
-                    linesContainer.style.fontSize = RTL_FONT_SIZE;
-                }
-            }
-
-            // 4. Each .view-line — Monaco sets dir="ltr" on them, override it
-            var viewLines = editorEl.querySelectorAll('.view-line');
-            for (var k = 0; k < viewLines.length; k++) {
-                if (viewLines[k].getAttribute('dir') !== dir) {
-                    viewLines[k].setAttribute('dir', dir);
-                }
-                viewLines[k].style.direction = dir;
-                viewLines[k].style.textAlign = isArabic ? 'right' : '';
-            }
-
-            if (observer && linesContainer) {
-                observer.observe(linesContainer, { childList: true, subtree: true, attributes: true, attributeFilter: ['dir'] });
-            }
+    function isMainCodeEditor(monacoEl) {
+        if (!monacoEl || !monacoEl.closest) { return false; }
+        for (var i = 0; i < CODE_EDITOR_ANCESTORS.length; i++) {
+            if (monacoEl.closest(CODE_EDITOR_ANCESTORS[i])) return true;
         }
-
-        function attachEditor(editor) {
-            if (editor.__rtlWatched) { return; }
-            editor.__rtlWatched = true;
-            
-            var _inputDirTimeout = null;
-            var lineObserver = new MutationObserver(function () {
-                if (_inputDirTimeout) clearTimeout(_inputDirTimeout);
-                _inputDirTimeout = setTimeout(function () {
-                    _inputDirTimeout = null;
-                    applyInputDirection(editor, lineObserver);
-                }, 200);
-            });
-            
-            applyInputDirection(editor, lineObserver);
-
-            var inputArea = editor.querySelector('.inputarea');
-            if (inputArea) {
-                inputArea.addEventListener('input', function () {
-                    applyInputDirection(editor, lineObserver);
-                });
-                inputArea.addEventListener('compositionend', function () {
-                    applyInputDirection(editor, lineObserver);
-                });
-            }
-        }
-
-        watchInputEditors = function () {
-            // 1. Specific selectors covering different VS Code / Copilot chat versions
-            var selectors = [
-                '.interactive-input-editor .monaco-editor',
-                '.chat-input-part .monaco-editor',
-                '.aichat-input .monaco-editor',
-                '.chat-editor-container .monaco-editor',
-                '.chat-input-editor .monaco-editor',
-                '.interactive-session-input .monaco-editor',
-                '.copilot-chat .monaco-editor',
-                '.inline-chat .monaco-editor',
-                '[class*="chat-input"] .monaco-editor',
-                '[class*="copilot"] .monaco-editor',
-                '[class*="chat-session"] .monaco-editor',
-                '[class*="ced-chat"] .monaco-editor',
-            ];
-            document.querySelectorAll(selectors.join(',')).forEach(attachEditor);
-
-            // 2. Broader fallback: any Monaco editor in a panel/sidebar/auxiliary-bar
-            //    that looks like a small input (≤5 view-lines = chat input, not a code editor)
-            var panelEditors = document.querySelectorAll(
-                '.panel .monaco-editor, .sidebar .monaco-editor, ' +
-                '.auxiliary-bar .monaco-editor, .part.panel .monaco-editor'
-            );
-            panelEditors.forEach(function (editor) {
-                if (editor.__rtlWatched) { return; }
-                var viewLines = editor.querySelectorAll('.view-line');
-                if (viewLines.length <= 5) {
-                    attachEditor(editor);
-                }
-            });
-        };
-
-        var watchTimeout = null;
-        var inputObserver = new MutationObserver(function () {
-            if (watchTimeout) clearTimeout(watchTimeout);
-            watchTimeout = setTimeout(watchInputEditors, 500);
-        });
-        inputObserver.observe(document.body, { childList: true, subtree: true });
-        watchInputEditors();
+        return false;
     }
 
-    // ── Periodic fallback scan (handles lazy-loaded panels & class name changes) ──
+    function processNonCodeMonacos() {
+        var allMonacos = document.querySelectorAll('.monaco-editor');
+        for (var m = 0; m < allMonacos.length; m++) {
+            var editor = allMonacos[m];
+            if (isMainCodeEditor(editor)) continue;
+
+            var text = editor.textContent || '';
+
+            // Monaco removes then re-adds .view-line elements on every keystroke.
+            // During the brief DOM gap the textContent reads as empty/non-Arabic,
+            // which would remove the RTL class and cause a visible per-char flicker.
+            // Guard: if the editor is already in RTL mode and the text is momentarily
+            // empty, keep the current state instead of toggling.
+            if (!text.trim() && editor.classList.contains('copilot-rtl-v2')) {
+                continue;
+            }
+
+            var arabic = isArabicOrMixed(text);
+
+            // Toggle the class on the editor container
+            if (arabic) {
+                editor.classList.add('copilot-rtl-v2');
+            } else {
+                editor.classList.remove('copilot-rtl-v2');
+            }
+        }
+    }
+
+    // Run non-code Monaco scan inside the main scan cycle
+    var origScanAll = scanAll;
+    scanAll = function () {
+        origScanAll();
+        processNonCodeMonacos();
+    };
+
+    // Use a lightweight event listener for typing
+    document.addEventListener('input', function (e) {
+        var target = e.target;
+        if (!target || !target.closest) return;
+        var monacoParent = target.closest('.monaco-editor');
+        if (monacoParent && !isMainCodeEditor(monacoParent)) {
+            // If the editor is already in RTL mode, do not re-evaluate on every
+            // keystroke — the mutation-observer debounce will handle steady-state
+            // checks. This prevents removing-then-re-adding the class mid-render
+            // (the other half of the per-char flicker).
+            if (!monacoParent.classList.contains('copilot-rtl-v2')) {
+                processNonCodeMonacos();
+            }
+        }
+    }, true);
+
+    // ── Periodic fallback scan ──
     var _scanCount = 0;
     var _scanTimer = setInterval(function () {
         scanAll();
-        if (AUTO_INPUT_DIR && watchInputEditors) { watchInputEditors(); }
-        if (++_scanCount >= 20) { clearInterval(_scanTimer); }
-    }, 3000);
+        if (++_scanCount >= 30) clearInterval(_scanTimer);
+    }, 2000);
 
 }());
 `;
@@ -579,13 +551,13 @@ function getSettings(): { fontFamily: string; fontSize: number; lineHeight: numb
     };
 }
 
-function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, autoInputDirection: boolean): { success: boolean; error?: string } {
+function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): { success: boolean; error?: string } {
     try {
         const htmlDir = path.dirname(htmlPath);
         const jsPath = path.join(htmlDir, PATCH_JS_NAME);
 
         // Always write/overwrite the JS file (updates font settings)
-        fs.writeFileSync(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection), 'utf8');
+        fs.writeFileSync(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
 
         let content = fs.readFileSync(htmlPath, 'utf8');
         const version = Date.now();
@@ -732,20 +704,39 @@ export function activate(context: vscode.ExtensionContext): void {
         try {
             const content = fs.readFileSync(htmlPath, 'utf8');
             if (!isPatched(content)) {
-                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection } = getSettings();
-                const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection);
+                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
+                const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
                 if (result.success) {
                     promptReload('Copilot RTL installed and enabled automatically. Reload to apply.');
                 }
             } else {
-                // Main workbench already patched — make sure agent panel is also patched
+                // Already patched — always rewrite the JS file so extension updates take effect
+                // without requiring the user to disable then re-enable the extension manually.
+                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
+                try {
+                    const htmlDir = path.dirname(htmlPath);
+                    const jsPath = path.join(htmlDir, PATCH_JS_NAME);
+                    fs.writeFileSync(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+                } catch {
+                    // ignore — user can still use the manual enable command
+                }
+
+                // Also make sure agent panel is patched and up to date
                 const agentPath = getAgentHtmlPath();
                 if (agentPath) {
-                    const agentContent = fs.readFileSync(agentPath, 'utf8');
-                    if (!isPatched(agentContent)) {
-                        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-                        enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
-                        promptReload('Copilot RTL: Antigravity chat panel patched. Reload to apply.');
+                    try {
+                        const agentContent = fs.readFileSync(agentPath, 'utf8');
+                        if (!isPatched(agentContent)) {
+                            enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+                            promptReload('Copilot RTL: Antigravity chat panel patched. Reload to apply.');
+                        } else {
+                            // Rewrite agent JS too
+                            const agentDir = path.dirname(agentPath);
+                            const agentJsPath = path.join(agentDir, AGENT_PATCH_JS_NAME);
+                            fs.writeFileSync(agentJsPath, buildAgentScriptContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+                        }
+                    } catch {
+                        // ignore
                     }
                 }
             }
@@ -763,8 +754,8 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
         }
 
-        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection } = getSettings();
-        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection);
+        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
+        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
         if (result.success) {
             await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
         } else {
@@ -820,8 +811,8 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!htmlPath) { return; }
         const content = fs.readFileSync(htmlPath, 'utf8');
         if (!isPatched(content)) { return; }  // only update if already enabled
-        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection } = getSettings();
-        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, autoInputDirection);
+        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
+        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
         if (result.success) {
             await promptReload('Copilot RTL: Settings updated. Reload to apply.');
         }
@@ -830,4 +821,4 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(enableCmd, disableCmd, statusCmd, configListener);
 }
 
-export function deactivate(): void {}
+export function deactivate(): void { }

@@ -2,7 +2,7 @@
   "name": "copilot-rtl",
   "displayName": "Copilot RTL",
   "description": "change the direction of copilot chat to right-to-left for Arabic",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "WaelAboSamra",
   "license": "MIT",
   "repository": {
@@ -84,7 +84,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
