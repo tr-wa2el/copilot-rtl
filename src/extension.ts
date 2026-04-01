@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
 
 const MARKER_START = '<!-- COPILOT-RTL-PATCH-START -->';
@@ -52,6 +53,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         return ARABIC_RE.test(text);
     }
 
+    // ── Apply direction to a single element (used for user messages, table cells) ──
     function applyDirection(el) {
         if (el.tagName === 'PRE' || el.tagName === 'CODE') {
             el.style.direction = 'ltr';
@@ -73,23 +75,40 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         }
     }
 
+    // ── CSS-class approach for response containers ──────────────────────
+    // Instead of setting inline styles on each child element (which get
+    // destroyed when React/VS Code re-renders during streaming), we add a
+    // CSS class to the STABLE PARENT CONTAINER. CSS rules injected via
+    // injectStyles() automatically style all descendant text elements.
+    // This eliminates flicker because the class on the parent persists
+    // even when child elements are recreated.
+    var _isStreaming = false;
+
     function processMarkdown(root) {
-        // Iterate direct children directly (avoids :scope / > selector issues)
-        var children = root.children;
-        for (var i = 0; i < children.length; i++) {
-            applyDirection(children[i]);
+        var rootArabic = isArabicOrMixed(root.textContent || '');
+
+        // Once Arabic is detected, add the CSS class immediately
+        if (rootArabic) {
+            root.classList.add('copilot-rtl-response');
         }
-        // Also handle list items anywhere inside the container
-        var items = root.querySelectorAll('li');
-        for (var j = 0; j < items.length; j++) {
-            applyDirection(items[j]);
+
+        // If the container already has the RTL class and we're streaming,
+        // skip ALL child processing — this is the main anti-flicker guard.
+        // CSS rules on .copilot-rtl-response handle child styling automatically.
+        if (root.classList.contains('copilot-rtl-response') && _isStreaming) {
+            return;
         }
-        // Handle table cells — apply RTL per-cell so mixed tables work
+
+        // Non-streaming: apply/remove class based on current content
+        if (!rootArabic) {
+            root.classList.remove('copilot-rtl-response');
+        }
+
+        // Tables need per-cell treatment for mixed content
         var cells = root.querySelectorAll('th, td');
         for (var t = 0; t < cells.length; t++) {
             applyDirection(cells[t]);
         }
-        // If the table itself contains Arabic, set its overall direction
         var tables = root.querySelectorAll('table');
         for (var tb = 0; tb < tables.length; tb++) {
             if (isArabicOrMixed(tables[tb].textContent || '')) {
@@ -106,47 +125,66 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         });
     }
 
-    // ── Antigravity chat support (React + Tailwind + Lexical) ──────────
-    function scanAntigravity() {
-        // Bot response paragraphs, list items, headings
-        var selectors = [
-            '.leading-relaxed.select-text p',
-            '.leading-relaxed.select-text li',
-            '.leading-relaxed.select-text h1',
-            '.leading-relaxed.select-text h2',
-            '.leading-relaxed.select-text h3',
-            '.leading-relaxed.select-text h4',
-        ];
-        document.querySelectorAll(selectors.join(',')).forEach(function (el) {
-            if (el.tagName === 'PRE' || el.tagName === 'CODE' || el.closest('pre') || el.closest('code')) { return; }
-            applyDirection(el);
-        });
+    // ── Streaming stabilization ──────────────────────────────────────────
+    // After the AI finishes streaming (no mutations for 800ms), mark
+    // streaming as ended and do a final clean re-scan.
+    var _stabilizeTimeout = null;
+    function scheduleStabilize() {
+        _isStreaming = true;
+        if (_stabilizeTimeout) { clearTimeout(_stabilizeTimeout); }
+        _stabilizeTimeout = setTimeout(function () {
+            _stabilizeTimeout = null;
+            _isStreaming = false;
+            // Final clean re-scan — can now remove classes if needed
+            scanAllMarkdown();
+            scanAntigravity();
+        }, 800);
+    }
 
-        // Bot response container direction
-        document.querySelectorAll('.leading-relaxed.select-text').forEach(function (el) {
-            if (isArabicOrMixed(el.textContent || '')) {
-                el.style.direction = 'rtl';
+    // ── Antigravity chat support (React + Tailwind + Lexical) ──────────
+    // Uses the CSS-class approach: add 'copilot-rtl-response' to the
+    // STABLE container so children are styled via CSS, not inline styles.
+    function scanAntigravity() {
+        // Bot response CONTAINERS — add class, let CSS handle children
+        document.querySelectorAll('.leading-relaxed.select-text').forEach(function (container) {
+            var containerArabic = isArabicOrMixed(container.textContent || '');
+
+            // Lock the container as soon as Arabic is detected
+            if (containerArabic) {
+                container.classList.add('copilot-rtl-response');
+            }
+
+            // If locked and streaming, skip ALL child processing
+            if (container.classList.contains('copilot-rtl-response') && _isStreaming) {
+                return;
+            }
+
+            // Non-streaming: allow removal
+            if (!containerArabic) {
+                container.classList.remove('copilot-rtl-response');
             }
         });
 
-        // User messages (skip code/pre elements that also use whitespace-pre-wrap)
+        // User messages (skip code/pre and Lexical editors)
         document.querySelectorAll('.whitespace-pre-wrap').forEach(function (el) {
             if (el.tagName === 'CODE' || el.tagName === 'PRE' || el.closest('pre') || el.closest('code')) { return; }
+            if (el.closest('[data-lexical-editor="true"]')) { return; }
             applyDirection(el);
         });
 
-        // Table cells inside responses
-        document.querySelectorAll('.leading-relaxed.select-text th, .leading-relaxed.select-text td').forEach(function (el) {
-            applyDirection(el);
-        });
-        document.querySelectorAll('.leading-relaxed.select-text table').forEach(function (el) {
-            if (isArabicOrMixed(el.textContent || '')) {
-                el.style.direction = 'rtl';
-            } else {
-                el.style.direction = 'ltr';
-            }
-        });
-
+        // Table cells — only process when not streaming
+        if (!_isStreaming) {
+            document.querySelectorAll('.leading-relaxed.select-text th, .leading-relaxed.select-text td').forEach(function (el) {
+                applyDirection(el);
+            });
+            document.querySelectorAll('.leading-relaxed.select-text table').forEach(function (el) {
+                if (isArabicOrMixed(el.textContent || '')) {
+                    el.style.direction = 'rtl';
+                } else {
+                    el.style.direction = 'ltr';
+                }
+            });
+        }
     }
 
     // ── Input scan (called ONLY on user input events, never from MutationObserver) ──
@@ -160,12 +198,32 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             editor.style.textAlign = '';
             if (arabic) {
                 editor.classList.add('copilot-rtl-lexical');
+                // Use setProperty('important') so this inline !important beats
+                // any VS Code stylesheet rule regardless of specificity.
+                editor.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
+                editor.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
+                editor.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
             } else {
                 editor.classList.remove('copilot-rtl-lexical');
+                editor.style.removeProperty('font-family');
+                editor.style.removeProperty('font-size');
+                editor.style.removeProperty('line-height');
             }
             var children = editor.children;
             for (var i = 0; i < children.length; i++) {
-                applyDirection(children[i]);
+                var child = children[i];
+                var childArabic = isArabicOrMixed(child.textContent || '');
+                child.style.direction = childArabic ? 'rtl' : (arabic ? 'rtl' : 'ltr');
+                child.style.textAlign = childArabic ? 'right' : '';
+                if (arabic) {
+                    child.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
+                    child.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
+                    child.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
+                } else {
+                    child.style.removeProperty('font-family');
+                    child.style.removeProperty('font-size');
+                    child.style.removeProperty('line-height');
+                }
             }
         });
     }
@@ -183,14 +241,19 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                 _mdScanTimeout = null;
                 scanAll();
             }, 200);
+            // Each mutation means streaming is still active; schedule stabilize
+            scheduleStabilize();
         }
 
         var observer = new MutationObserver(scheduleMdScan);
 
+        // characterData removed intentionally — every character streamed by
+        // the AI was firing a mutation event, which was the main cause of
+        // flicker and poor performance. childList alone is sufficient to
+        // detect when new elements are added.
         observer.observe(document.body, {
             childList: true,
-            subtree: true,
-            characterData: true,
+            subtree: true
         });
 
         scanAll();
@@ -215,28 +278,72 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         if (document.getElementById('copilot-rtl-styles')) return;
         var style = document.createElement('style');
         style.id = 'copilot-rtl-styles';
-        // Use string concatenation to avoid TS template literal confusion with generated code variables
         var css = '';
-        // Do NOT set direction:rtl on the .monaco-editor container itself!
-        // Monaco uses a ~16M px wide .lines-content element for virtual scrolling.
-        // Setting direction:rtl on an ancestor causes absolutely-positioned children
-        // (like .view-lines) to snap to the RIGHT edge of that huge container,
-        // pushing text completely off-screen.  Direction is applied only to the
-        // specific text-rendering children below.
-        // Do NOT override font-family/font-size on .view-lines — Monaco uses its own font
-        // metrics (measured at startup) to calculate cursor pixel position. Changing the
-        // CSS font without updating Monaco's measurement cache causes the cursor to drift
-        // away from the actual text insertion point.
+
+        // ──────── ALWAYS-ACTIVE response RTL (zero JS needed) ─────────
+        // These rules target response containers DIRECTLY by selector.
+        // They are always active and survive React re-renders because they
+        // live in the <style> tag, not as classes/attributes on elements.
+        // unicode-bidi:plaintext makes the browser auto-detect direction
+        // per paragraph from the first strong character (Arabic=RTL, Latin=LTR).
+
+        // Antigravity response containers
+        css += '.leading-relaxed.select-text p, .leading-relaxed.select-text li, ';
+        css += '.leading-relaxed.select-text h1, .leading-relaxed.select-text h2, ';
+        css += '.leading-relaxed.select-text h3, .leading-relaxed.select-text h4, ';
+        css += '.leading-relaxed.select-text h5, .leading-relaxed.select-text h6 { ';
+        css += 'unicode-bidi: plaintext !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+
+        // VS Code Copilot chat containers (rendered-markdown, etc.)
+        var mdSels = MD_CONTAINER_SELECTORS.map(function(s) {
+            return s + ' > p, ' + s + ' > li, ' + s + ' > h1, ' + s + ' > h2, ' + s + ' > h3, ' + s + ' > h4, ' + s + ' li';
+        }).join(', ');
+        css += mdSels + ' { ';
+        css += 'unicode-bidi: plaintext !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+
+        // Code blocks must ALWAYS stay LTR regardless
+        css += '.leading-relaxed.select-text pre, .leading-relaxed.select-text code { ';
+        css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
+        css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
+        css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
+        var mdCodeSels = MD_CONTAINER_SELECTORS.map(function(s) {
+            return s + ' pre, ' + s + ' code';
+        }).join(', ');
+        css += mdCodeSels + ' { ';
+        css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
+        css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
+        css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
+
+        // ──────── Class-based RTL (secondary reinforcement) ───────────
+        css += '.copilot-rtl-response { direction: rtl !important; }';
+        css += '.copilot-rtl-response p, .copilot-rtl-response li, ';
+        css += '.copilot-rtl-response h1, .copilot-rtl-response h2, ';
+        css += '.copilot-rtl-response h3, .copilot-rtl-response h4, ';
+        css += '.copilot-rtl-response h5, .copilot-rtl-response h6 { ';
+        css += 'direction: rtl !important; text-align: right !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
+        css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
+        css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
+        css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
+
+        // ──────── Monaco chat input RTL ──────────────────────────────────
         css += '.copilot-rtl-v2 .view-lines { unicode-bidi: plaintext !important; }';
         css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
-        // Apply direction to the native input surface so the browser positions its own
-        // cursor (caret) correctly inside the EditContext / contenteditable area.
-        // font-size on native-edit-context and inputarea is safe — they are hidden input
-        // surfaces, not the rendered view, so they do not affect Monaco's layout metrics.
         css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
-        css += '.copilot-rtl-v2 .mtk1 { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
-        // Lexical input — class applied when Arabic detected; !important overrides VS Code stylesheet rules
+        css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+        css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+
+        // ──────── Lexical input ──────────────────────────────────────────
         css += '[data-lexical-editor="true"].copilot-rtl-lexical { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '[data-lexical-editor="true"].copilot-rtl-lexical > p { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '[data-lexical-editor="true"].copilot-rtl-lexical span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
@@ -289,15 +396,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         }
     }
 
-    // Run non-code Monaco scan inside the main scan cycle.
-    // NOTE: processNonCodeMonacos is intentionally NOT added to the MutationObserver
-    // scanAll cycle — doing so caused the chat input to flicker between LTR/RTL on
-    // every token streamed by the AI. Input detection happens via the 'input' event
-    // and the periodic fallback scan instead.
-    var origScanAll = scanAll;
-    scanAll = function () {
-        origScanAll();
-    };
+    // Dead code removed — origScanAll wrapper was a no-op.
 
     // Use a lightweight event listener for typing (Monaco input)
     document.addEventListener('input', function (e) {
@@ -365,21 +464,30 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         }
     }
 
-    // ── Chat messages (response + user messages) ─────────────────────────
-    // Antigravity renders chat text inside these containers:
-    //   - .leading-relaxed.select-text (bot responses with markdown)
-    //   - .whitespace-pre-wrap (user messages and inline text)
-    function processMessages() {
-        // Bot response paragraphs
-        document.querySelectorAll('.leading-relaxed.select-text p, .leading-relaxed.select-text li').forEach(function (el) {
-            if (el.tagName === 'PRE' || el.tagName === 'CODE' || el.closest('pre') || el.closest('code')) { return; }
-            applyRtlStyle(el, isArabic(el.textContent || ''));
-        });
+    // ── CSS-class approach for response containers ──────────────────────
+    // Same approach as the main workbench script: add a CSS class to the
+    // STABLE parent container instead of inline styles on children.
+    var _isStreaming = false;
 
-        // Bot response container direction (for list markers, etc.)
-        document.querySelectorAll('.leading-relaxed.select-text').forEach(function (el) {
-            if (isArabic(el.textContent || '')) {
-                el.style.direction = 'rtl';
+    // ── Chat messages (response + user messages) ─────────────────────────
+    function processMessages() {
+        // Bot response CONTAINERS — add class, let CSS handle children
+        document.querySelectorAll('.leading-relaxed.select-text').forEach(function (container) {
+            var containerArabic = isArabic(container.textContent || '');
+
+            // Lock the container as soon as Arabic is detected
+            if (containerArabic) {
+                container.classList.add('copilot-rtl-response');
+            }
+
+            // If locked and streaming, skip ALL child processing
+            if (container.classList.contains('copilot-rtl-response') && _isStreaming) {
+                return;
+            }
+
+            // Non-streaming: allow removal
+            if (!containerArabic) {
+                container.classList.remove('copilot-rtl-response');
             }
         });
 
@@ -388,31 +496,61 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
             applyRtlStyle(el, isArabic(el.textContent || ''));
         });
 
-        // Headings inside responses
-        document.querySelectorAll('.leading-relaxed.select-text h1, .leading-relaxed.select-text h2, .leading-relaxed.select-text h3, .leading-relaxed.select-text h4').forEach(function (el) {
-            applyRtlStyle(el, isArabic(el.textContent || ''));
-        });
-
-        // Table cells — apply RTL per-cell so mixed tables work
-        document.querySelectorAll('.leading-relaxed.select-text th, .leading-relaxed.select-text td').forEach(function (el) {
-            applyRtlStyle(el, isArabic(el.textContent || ''));
-        });
-        // Table overall direction
-        document.querySelectorAll('.leading-relaxed.select-text table').forEach(function (el) {
-            if (isArabic(el.textContent || '')) {
-                el.style.direction = 'rtl';
-            } else {
-                el.style.direction = 'ltr';
-            }
-        });
+        // Table cells — only process when not streaming
+        if (!_isStreaming) {
+            document.querySelectorAll('.leading-relaxed.select-text th, .leading-relaxed.select-text td').forEach(function (el) {
+                applyRtlStyle(el, isArabic(el.textContent || ''));
+            });
+            document.querySelectorAll('.leading-relaxed.select-text table').forEach(function (el) {
+                if (isArabic(el.textContent || '')) {
+                    el.style.direction = 'rtl';
+                } else {
+                    el.style.direction = 'ltr';
+                }
+            });
+        }
     }
 
-    // ── CSS injection for Lexical input font (agent panel) ─────────────
+    // ── CSS injection for response containers + Lexical input ──────────
     function injectAgentStyles() {
         if (document.getElementById('copilot-rtl-agent-styles')) return;
         var style = document.createElement('style');
         style.id = 'copilot-rtl-agent-styles';
         var css = '';
+
+        // ──────── ALWAYS-ACTIVE response RTL (zero JS needed) ─────────
+        // Directly targets response containers by selector — survives React
+        // re-renders because CSS rules live in the <style> tag, not on elements.
+        css += '.leading-relaxed.select-text p, .leading-relaxed.select-text li, ';
+        css += '.leading-relaxed.select-text h1, .leading-relaxed.select-text h2, ';
+        css += '.leading-relaxed.select-text h3, .leading-relaxed.select-text h4, ';
+        css += '.leading-relaxed.select-text h5, .leading-relaxed.select-text h6 { ';
+        css += 'unicode-bidi: plaintext !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        // Code blocks stay LTR
+        css += '.leading-relaxed.select-text pre, .leading-relaxed.select-text code { ';
+        css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
+        css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
+        css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
+
+        // Class-based reinforcement (secondary)
+        css += '.copilot-rtl-response { direction: rtl !important; }';
+        css += '.copilot-rtl-response p, .copilot-rtl-response li, ';
+        css += '.copilot-rtl-response h1, .copilot-rtl-response h2, ';
+        css += '.copilot-rtl-response h3, .copilot-rtl-response h4, ';
+        css += '.copilot-rtl-response h5, .copilot-rtl-response h6 { ';
+        css += 'direction: rtl !important; text-align: right !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
+        css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
+        css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
+        css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
+
+        // Lexical input
         css += '[data-lexical-editor="true"].copilot-rtl-lexical { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '[data-lexical-editor="true"].copilot-rtl-lexical > p { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '[data-lexical-editor="true"].copilot-rtl-lexical span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
@@ -433,21 +571,50 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
             editor.style.direction = '';
             editor.style.textAlign = '';
 
-            // Use CSS class so !important overrides VS Code's own stylesheet rules
             if (arabic) {
                 editor.classList.add('copilot-rtl-lexical');
+                editor.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
+                editor.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
+                editor.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
             } else {
                 editor.classList.remove('copilot-rtl-lexical');
+                editor.style.removeProperty('font-family');
+                editor.style.removeProperty('font-size');
+                editor.style.removeProperty('line-height');
             }
 
             var children = editor.children;
             for (var i = 0; i < children.length; i++) {
-                var childText = children[i].textContent || '';
-                var childArabic = isArabic(childText);
-                children[i].style.direction = childArabic ? 'rtl' : 'ltr';
-                children[i].style.textAlign = childArabic ? 'right' : 'left';
+                var child = children[i];
+                var childArabic = isArabic(child.textContent || '');
+                child.style.direction = childArabic ? 'rtl' : (arabic ? 'rtl' : 'ltr');
+                child.style.textAlign = childArabic ? 'right' : '';
+                if (arabic) {
+                    child.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
+                    child.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
+                    child.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
+                } else {
+                    child.style.removeProperty('font-family');
+                    child.style.removeProperty('font-size');
+                    child.style.removeProperty('line-height');
+                }
             }
         });
+    }
+
+    // ── Streaming stabilization ──────────────────────────────────────────
+    // After the AI finishes streaming (no mutations for 800ms), mark
+    // streaming as ended and do a final clean re-scan.
+    var _stabilizeTimeout = null;
+    function scheduleStabilize() {
+        _isStreaming = true;
+        if (_stabilizeTimeout) { clearTimeout(_stabilizeTimeout); }
+        _stabilizeTimeout = setTimeout(function () {
+            _stabilizeTimeout = null;
+            _isStreaming = false;
+            // Final clean re-scan — can now remove classes if needed
+            processMessages();
+        }, 800);
     }
 
     // ── Debounced observer ───────────────────────────────────────────────
@@ -460,14 +627,17 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
             // caused by direction/font toggling on each streamed token from the AI.
             processMessages();
         }, 200);
+        // Each mutation means streaming is still active; schedule stabilize
+        scheduleStabilize();
     }
 
     function startObserver() {
         var observer = new MutationObserver(scheduleScan);
+        // characterData removed — same as main script, prevents per-character
+        // mutation events during AI streaming.
         observer.observe(document.body, {
             childList: true,
-            subtree: true,
-            characterData: true,
+            subtree: true
         });
         // Only scan responses here; input is handled by 'input' events
         processMessages();
@@ -597,15 +767,15 @@ function getSettings(): { fontFamily: string; fontSize: number; lineHeight: numb
     };
 }
 
-function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): { success: boolean; error?: string } {
+async function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): Promise<{ success: boolean; error?: string }> {
     try {
         const htmlDir = path.dirname(htmlPath);
         const jsPath = path.join(htmlDir, PATCH_JS_NAME);
 
         // Always write/overwrite the JS file (updates font settings)
-        fs.writeFileSync(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+        await fsp.writeFile(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
 
-        let content = fs.readFileSync(htmlPath, 'utf8');
+        let content = await fsp.readFile(htmlPath, 'utf8');
         const version = Date.now();
         const patch = buildPatchContent(version);
 
@@ -620,7 +790,7 @@ function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lin
             // Create a backup only on first-time install
             const backupPath = `${htmlPath}.bak-copilot-rtl`;
             if (!fs.existsSync(backupPath)) {
-                fs.writeFileSync(backupPath, content, 'utf8');
+                await fsp.writeFile(backupPath, content, 'utf8');
             }
         }
 
@@ -630,10 +800,10 @@ function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lin
             content += '\n' + patch;
         }
 
-        fs.writeFileSync(htmlPath, content, 'utf8');
+        await fsp.writeFile(htmlPath, content, 'utf8');
 
         // Also patch the Antigravity agent panel if it exists
-        enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+        await enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
 
         return { success: true };
     } catch (err: unknown) {
@@ -642,7 +812,7 @@ function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lin
     }
 }
 
-function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): { success: boolean; error?: string } {
+async function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): Promise<{ success: boolean; error?: string }> {
     const agentPath = getAgentHtmlPath();
     if (!agentPath) { return { success: false, error: 'Agent HTML not found' }; }
 
@@ -651,9 +821,9 @@ function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight: numb
         const jsPath = path.join(htmlDir, AGENT_PATCH_JS_NAME);
 
         // Write the agent-specific JS
-        fs.writeFileSync(jsPath, buildAgentScriptContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+        await fsp.writeFile(jsPath, buildAgentScriptContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
 
-        let content = fs.readFileSync(agentPath, 'utf8');
+        let content = await fsp.readFile(agentPath, 'utf8');
         const version = Date.now();
         const patch = buildAgentPatchContent(version);
 
@@ -666,7 +836,7 @@ function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight: numb
         } else {
             const backupPath = `${agentPath}.bak-copilot-rtl`;
             if (!fs.existsSync(backupPath)) {
-                fs.writeFileSync(backupPath, content, 'utf8');
+                await fsp.writeFile(backupPath, content, 'utf8');
             }
         }
 
@@ -676,7 +846,7 @@ function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight: numb
             content += '\n' + patch;
         }
 
-        fs.writeFileSync(agentPath, content, 'utf8');
+        await fsp.writeFile(agentPath, content, 'utf8');
         return { success: true };
     } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -684,9 +854,9 @@ function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight: numb
     }
 }
 
-function disablePatch(htmlPath: string): { success: boolean; error?: string } {
+async function disablePatch(htmlPath: string): Promise<{ success: boolean; error?: string }> {
     try {
-        let content = fs.readFileSync(htmlPath, 'utf8');
+        let content = await fsp.readFile(htmlPath, 'utf8');
 
         if (isPatched(content)) {
             const regex = new RegExp(
@@ -694,17 +864,15 @@ function disablePatch(htmlPath: string): { success: boolean; error?: string } {
                 'g'
             );
             content = content.replace(regex, '');
-            fs.writeFileSync(htmlPath, content, 'utf8');
+            await fsp.writeFile(htmlPath, content, 'utf8');
         }
 
         // Remove the JS file if it exists
         const jsPath = path.join(path.dirname(htmlPath), PATCH_JS_NAME);
-        if (fs.existsSync(jsPath)) {
-            fs.unlinkSync(jsPath);
-        }
+        try { await fsp.unlink(jsPath); } catch { /* file may not exist */ }
 
         // Also clean up the agent panel
-        disableAgentPatch();
+        await disableAgentPatch();
 
         return { success: true };
     } catch (err: unknown) {
@@ -713,24 +881,22 @@ function disablePatch(htmlPath: string): { success: boolean; error?: string } {
     }
 }
 
-function disableAgentPatch(): void {
+async function disableAgentPatch(): Promise<void> {
     const agentPath = getAgentHtmlPath();
     if (!agentPath) { return; }
 
     try {
-        let content = fs.readFileSync(agentPath, 'utf8');
+        let content = await fsp.readFile(agentPath, 'utf8');
         if (isPatched(content)) {
             const regex = new RegExp(
                 `\\n?${escapeForRegex(MARKER_START)}[\\s\\S]*?${escapeForRegex(MARKER_END)}\\n?`,
                 'g'
             );
             content = content.replace(regex, '');
-            fs.writeFileSync(agentPath, content, 'utf8');
+            await fsp.writeFile(agentPath, content, 'utf8');
         }
         const jsPath = path.join(path.dirname(agentPath), AGENT_PATCH_JS_NAME);
-        if (fs.existsSync(jsPath)) {
-            fs.unlinkSync(jsPath);
-        }
+        try { await fsp.unlink(jsPath); } catch { /* file may not exist */ }
     } catch {
         // ignore
     }
@@ -743,15 +909,15 @@ async function promptReload(message: string): Promise<void> {
     }
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
     // ── Auto-enable on first activation ──────────────────────────────────────
     const htmlPath = getWorkbenchHtmlPath();
     if (htmlPath) {
         try {
-            const content = fs.readFileSync(htmlPath, 'utf8');
+            const content = await fsp.readFile(htmlPath, 'utf8');
             if (!isPatched(content)) {
                 const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-                const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+                const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
                 if (result.success) {
                     promptReload('Copilot RTL installed and enabled automatically. Reload to apply.');
                 }
@@ -762,7 +928,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 try {
                     const htmlDir = path.dirname(htmlPath);
                     const jsPath = path.join(htmlDir, PATCH_JS_NAME);
-                    fs.writeFileSync(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+                    await fsp.writeFile(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
                 } catch {
                     // ignore — user can still use the manual enable command
                 }
@@ -771,15 +937,15 @@ export function activate(context: vscode.ExtensionContext): void {
                 const agentPath = getAgentHtmlPath();
                 if (agentPath) {
                     try {
-                        const agentContent = fs.readFileSync(agentPath, 'utf8');
+                        const agentContent = await fsp.readFile(agentPath, 'utf8');
                         if (!isPatched(agentContent)) {
-                            enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+                            await enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
                             promptReload('Copilot RTL: Antigravity chat panel patched. Reload to apply.');
                         } else {
                             // Rewrite agent JS too
                             const agentDir = path.dirname(agentPath);
                             const agentJsPath = path.join(agentDir, AGENT_PATCH_JS_NAME);
-                            fs.writeFileSync(agentJsPath, buildAgentScriptContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+                            await fsp.writeFile(agentJsPath, buildAgentScriptContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
                         }
                     } catch {
                         // ignore
@@ -801,7 +967,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
 
         const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+        const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
         if (result.success) {
             await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
         } else {
@@ -820,7 +986,7 @@ export function activate(context: vscode.ExtensionContext): void {
             return;
         }
 
-        const result = disablePatch(htmlPath);
+        const result = await disablePatch(htmlPath);
         if (result.success) {
             await promptReload('Copilot RTL disabled. Reload VS Code to apply changes.');
         } else {
@@ -830,7 +996,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
     });
 
-    const statusCmd = vscode.commands.registerCommand('copilot-rtl.status', () => {
+    const statusCmd = vscode.commands.registerCommand('copilot-rtl.status', async () => {
         const htmlPath = getWorkbenchHtmlPath();
         if (!htmlPath) {
             vscode.window.showWarningMessage(
@@ -840,7 +1006,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
 
         try {
-            const content = fs.readFileSync(htmlPath, 'utf8');
+            const content = await fsp.readFile(htmlPath, 'utf8');
             const enabled = isPatched(content);
             vscode.window.showInformationMessage(
                 `Copilot RTL is currently ${enabled ? '✅ ENABLED' : '❌ DISABLED'}.`
@@ -855,10 +1021,12 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!e.affectsConfiguration('copilotRtl')) { return; }
         const htmlPath = getWorkbenchHtmlPath();
         if (!htmlPath) { return; }
-        const content = fs.readFileSync(htmlPath, 'utf8');
-        if (!isPatched(content)) { return; }  // only update if already enabled
+        try {
+            const content = await fsp.readFile(htmlPath, 'utf8');
+            if (!isPatched(content)) { return; }  // only update if already enabled
+        } catch { return; }
         const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-        const result = enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+        const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
         if (result.success) {
             await promptReload('Copilot RTL: Settings updated. Reload to apply.');
         }
