@@ -14,6 +14,10 @@ Adds automatic **RTL (Right-to-Left)** support to VS Code Copilot chat for Arabi
 
 ![VS Code](images/vs-code.png)
 
+**Cursor**
+
+![Cursor](images/cursor.png)
+
 **Antigravity**
 
 ![Antigravity](images/antigravity.png)

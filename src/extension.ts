@@ -372,18 +372,24 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
 
         // ──────── Cursor user messages (CSS-only, no JS needed) ──────────
         // Sent user messages in Cursor become readonly Lexical editors.
-        // Use unicode-bidi:plaintext so the browser auto-detects direction
-        // from text content — no JS class toggle needed.
+        // Use unicode-bidi:plaintext so the browser auto-detects direction.
+
+        // Fix layout: the text container (.min-w-0) inside the flex parent
+        // shrinks to content width by default, making text-align:right useless.
+        // Force it to take full width so RTL alignment is visible.
+        css += '.composer-human-message .min-w-0 { flex: 1 1 0% !important; width: 100% !important; }';
+
+        // The readonly Lexical editor and its children need proper RTL handling
+        css += '.composer-human-message [data-lexical-editor] { width: 100% !important; }';
         css += '.composer-human-message [data-lexical-editor] p, ';
-        css += '.composer-human-message [data-lexical-editor] span[data-lexical-text] { ';
+        css += '.aislash-editor-input-readonly p { ';
         css += 'unicode-bidi: plaintext !important; ';
         css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
         css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
         css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
-        // Cursor readonly Lexical editors (covers all sent messages)
-        css += '.aislash-editor-input-readonly p, ';
-        css += '.aislash-editor-input-readonly span[data-lexical-text] { ';
-        css += 'unicode-bidi: plaintext !important; ';
+        // Ensure spans (text nodes) also get the font explicitly
+        css += '.composer-human-message [data-lexical-editor] span, ';
+        css += '.aislash-editor-input-readonly span { ';
         css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
         css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
         css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
