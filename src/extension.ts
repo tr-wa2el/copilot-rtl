@@ -151,14 +151,23 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         document.querySelectorAll('[data-lexical-editor="true"]').forEach(function (editor) {
             var text = editor.textContent || '';
             var arabic = isArabicOrMixed(text);
-            editor.style.direction = arabic ? 'rtl' : 'ltr';
-            editor.style.textAlign = arabic ? 'right' : 'left';
+            
+            // Remove hardcoded direction/textAlign from the parent container
+            editor.style.direction = '';
+            editor.style.textAlign = '';
+            
             if (arabic) {
                 editor.style.fontFamily = RTL_FONT_FAMILY;
                 editor.style.fontSize = RTL_FONT_SIZE;
             } else {
                 editor.style.fontFamily = '';
                 editor.style.fontSize = '';
+            }
+
+            // Apply direction per paragraph so each has its own alignment
+            var children = editor.children;
+            for (var i = 0; i < children.length; i++) {
+                applyDirection(children[i]);
             }
         });
     }
@@ -198,17 +207,25 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     // Watch Lexical input changes directly (Antigravity)
     document.addEventListener('input', function (e) {
         var target = e.target;
-        if (target && target.getAttribute && target.getAttribute('data-lexical-editor') === 'true') {
-            var text = target.textContent || '';
+        var editor = target && target.closest ? target.closest('[data-lexical-editor="true"]') : null;
+        if (editor) {
+            var text = editor.textContent || '';
             var arabic = ARABIC_RE.test(text);
-            target.style.direction = arabic ? 'rtl' : 'ltr';
-            target.style.textAlign = arabic ? 'right' : 'left';
+            
+            editor.style.direction = '';
+            editor.style.textAlign = '';
+            
             if (arabic) {
-                target.style.fontFamily = RTL_FONT_FAMILY;
-                target.style.fontSize = RTL_FONT_SIZE;
+                editor.style.fontFamily = RTL_FONT_FAMILY;
+                editor.style.fontSize = RTL_FONT_SIZE;
             } else {
-                target.style.fontFamily = '';
-                target.style.fontSize = '';
+                editor.style.fontFamily = '';
+                editor.style.fontSize = '';
+            }
+
+            var children = editor.children;
+            for (var i = 0; i < children.length; i++) {
+                applyDirection(children[i]);
             }
         }
     }, true);
@@ -397,14 +414,24 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         editors.forEach(function (editor) {
             var text = editor.textContent || '';
             var arabic = isArabic(text);
-            editor.style.direction = arabic ? 'rtl' : 'ltr';
-            editor.style.textAlign = arabic ? 'right' : 'left';
+            
+            editor.style.direction = '';
+            editor.style.textAlign = '';
+            
             if (arabic) {
                 editor.style.fontFamily = RTL_FONT_FAMILY;
                 editor.style.fontSize = RTL_FONT_SIZE;
             } else {
                 editor.style.fontFamily = '';
                 editor.style.fontSize = '';
+            }
+
+            var children = editor.children;
+            for (var i = 0; i < children.length; i++) {
+                var childText = children[i].textContent || '';
+                var childArabic = isArabic(childText);
+                children[i].style.direction = childArabic ? 'rtl' : 'ltr';
+                children[i].style.textAlign = childArabic ? 'right' : 'left';
             }
         });
     }
@@ -435,7 +462,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
     function watchInputEvents() {
         document.addEventListener('input', function (e) {
             var target = e.target;
-            if (target && target.getAttribute && target.getAttribute('data-lexical-editor') === 'true') {
+            if (target && target.closest && target.closest('[data-lexical-editor="true"]')) {
                 processInput();
             }
         }, true);
