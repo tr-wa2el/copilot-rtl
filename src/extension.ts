@@ -237,7 +237,12 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         style.id = 'copilot-rtl-styles';
         // Use string concatenation to avoid TS template literal confusion with generated code variables
         var css = '';
-        css += '.copilot-rtl-v2 { direction: rtl !important; text-align: right !important; }';
+        // Do NOT set direction:rtl on the .monaco-editor container itself!
+        // Monaco uses a ~16M px wide .lines-content element for virtual scrolling.
+        // Setting direction:rtl on an ancestor causes absolutely-positioned children
+        // (like .view-lines) to snap to the RIGHT edge of that huge container,
+        // pushing text completely off-screen.  Direction is applied only to the
+        // specific text-rendering children below.
         // Do NOT override font-family/font-size on .view-lines — Monaco uses its own font
         // metrics (measured at startup) to calculate cursor pixel position. Changing the
         // CSS font without updating Monaco's measurement cache causes the cursor to drift
