@@ -257,14 +257,18 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     function observeMarkdown() {
         var _mdScanTimeout = null;
         function scheduleMdScan() {
-            if (_mdScanTimeout) return;
+            // Trailing-edge debounce: reset timer on every mutation so the scan
+            // only fires after mutations have settled. This prevents repeated
+            // scanAll() calls (every 200 ms) during streaming which caused
+            // flicker in tables and bullet lists.
+            if (_mdScanTimeout) clearTimeout(_mdScanTimeout);
             _mdScanTimeout = setTimeout(function () {
                 _mdScanTimeout = null;
                 scanAll();
                 // Also scan Monaco inputs on every DOM mutation (e.g. switching
                 // chat threads recreates elements but fires no 'input' events).
                 processNonCodeMonacos();
-            }, 200);
+            }, 300);
             // Each mutation means streaming is still active; schedule stabilize
             scheduleStabilize();
         }
@@ -374,6 +378,15 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
         css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+        // Protect Monaco code views inside AI response containers from inheriting RTL.
+        // The .copilot-rtl-response container sets direction:rtl on the whole block,
+        // but embedded Monaco editors (code blocks in responses) must always stay LTR.
+        var mdInlineCodeSels = MD_CONTAINER_SELECTORS.map(function(s) {
+            return s + ' .monaco-editor, ' + s + ' .monaco-editor .view-line, ' + s + ' .monaco-editor .view-lines';
+        }).join(', ');
+        css += mdInlineCodeSels + ' { direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; }';
+        css += '.copilot-rtl-response .monaco-editor, .copilot-rtl-response .monaco-editor .view-line, .copilot-rtl-response .monaco-editor .view-lines { direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; }';
+        css += '.leading-relaxed.select-text .monaco-editor, .leading-relaxed.select-text .monaco-editor .view-line { direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; }';
 
         // ──────── Lexical input (class-based, toggled by JS) ────────────────
         css += '[data-lexical-editor="true"].copilot-rtl-lexical { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
@@ -425,26 +438,31 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         return false;
     }
 
+    // True while we are inside a double-rAF triggered by an 'input' event.
+    // Used to distinguish "momentarily empty during Monaco re-render" from
+    // "genuinely empty input" so the empty guard doesn't lock RTL on new conversations.
+    var _monacoTyping = false;
+
     function processNonCodeMonacos() {
         var allMonacos = document.querySelectorAll('.monaco-editor');
         for (var m = 0; m < allMonacos.length; m++) {
             var editor = allMonacos[m];
             if (isMainCodeEditor(editor)) continue;
 
-            var text = editor.textContent || '';
+            // Read ONLY from .view-lines so we don't pick up placeholder text,
+            // aria labels, decorations, or surrounding DOM that isn't the typed text.
+            var viewLines = editor.querySelector('.view-lines');
+            var text = viewLines ? (viewLines.textContent || '') : (editor.textContent || '');
 
-            // Monaco removes then re-adds .view-line elements on every keystroke.
-            // During the brief DOM gap the textContent reads as empty/non-Arabic,
-            // which would remove the RTL class and cause a visible per-char flicker.
-            // Guard: if the editor is already in RTL mode and the text is momentarily
-            // empty, keep the current state instead of toggling.
-            if (!text.trim() && editor.classList.contains('copilot-rtl-v2')) {
+            // Empty guard: only keep the class if we're mid-render (typing).
+            // On a periodic scan, focusin, or thread switch (not typing), an
+            // empty input correctly removes the class so new conversations start LTR.
+            if (!text.trim() && editor.classList.contains('copilot-rtl-v2') && _monacoTyping) {
                 continue;
             }
 
             var arabic = isArabicOrMixed(text);
 
-            // Toggle the class on the editor container
             if (arabic) {
                 editor.classList.add('copilot-rtl-v2');
             } else {
@@ -453,24 +471,27 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         }
     }
 
-    // Dead code removed — origScanAll wrapper was a no-op.
-
     // Use a lightweight event listener for typing (Monaco input).
-    // Always call processNonCodeMonacos — no has-class guard — so direction
-    // is updated correctly in both directions (LTR→RTL and RTL→LTR).
+    // Double rAF: Monaco needs 2 frames to fully update .view-line elements
+    // after the inputarea textarea receives a character.
     document.addEventListener('input', function (e) {
         var target = e.target;
         if (!target || !target.closest) return;
         var monacoParent = target.closest('.monaco-editor');
         if (monacoParent && !isMainCodeEditor(monacoParent)) {
-            // Defer by one rAF so Monaco has time to update .view-line
-            // elements before we read textContent.
-            requestAnimationFrame(function () { processNonCodeMonacos(); });
+            _monacoTyping = true;
+            requestAnimationFrame(function () {
+                requestAnimationFrame(function () {
+                    _monacoTyping = false;
+                    processNonCodeMonacos();
+                });
+            });
         }
     }, true);
 
     // Also scan when the user focuses any Monaco chat input.
-    // This handles switching to an existing conversation without typing.
+    // _monacoTyping is false here so an empty input correctly removes copilot-rtl-v2,
+    // which fixes "new conversation starts as RTL".
     document.addEventListener('focusin', function (e) {
         var target = e.target;
         if (!target || !target.closest) return;
@@ -681,13 +702,17 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
     // ── Debounced observer ───────────────────────────────────────────────
     var _scanTimeout = null;
     function scheduleScan() {
-        if (_scanTimeout) { return; }
+        // Trailing-edge debounce: reset timer on every mutation so the scan
+        // only fires after mutations have settled. This prevents repeated
+        // processMessages() calls during streaming which caused flicker in
+        // tables and bullet lists.
+        if (_scanTimeout) { clearTimeout(_scanTimeout); }
         _scanTimeout = setTimeout(function () {
             _scanTimeout = null;
             // Only scan AI responses — NOT processInput() — to prevent flickering
             // caused by direction/font toggling on each streamed token from the AI.
             processMessages();
-        }, 200);
+        }, 300);
         // Each mutation means streaming is still active; schedule stabilize
         scheduleStabilize();
     }

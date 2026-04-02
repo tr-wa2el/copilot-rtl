@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5] - 2026-04-02
+
+### Fixed
+- Monaco chat input now correctly starts as LTR on new/empty conversations — the empty-guard that was locking the RTL class on blank inputs has been scoped to only apply during Monaco's render gap (while typing)
+- Typing Arabic in the chat input now reliably switches direction to RTL — upgraded to double `requestAnimationFrame` since Monaco needs two frames to fully update `.view-line` elements after an input event
+- Chat input direction now reads from `.view-lines` only instead of the full `editor.textContent`, avoiding false Arabic detection from placeholder text, aria labels, and decorations
+- Added `_monacoTyping` flag to cleanly distinguish "editor is mid-render" from "editor is genuinely empty"
+
 ## [0.1.4] - 2026-04-02
 
 ### Fixed
@@ -7,7 +15,6 @@
 - Fixed flicker on tables and bullet lists during AI streaming — `td`/`th` cells now get their direction from CSS (`unicode-bidi: plaintext`) instead of inline styles being re-applied on every streamed token
 - Removed the 60-second limit on the periodic scanner that caused RTL to stop working after one minute
 - Added `focusin` listener to scan Monaco inputs immediately when the user focuses the chat input
-- Deferred `textContent` reads via `requestAnimationFrame` so Monaco finishes re-rendering `.view-line` elements before direction is evaluated
 - Added `processNonCodeMonacos()` inside `scheduleMdScan` so chat thread switches trigger an immediate Monaco scan
 
 ## [0.1.3] - 2026-04-02
