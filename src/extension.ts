@@ -107,17 +107,22 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             root.classList.remove('copilot-rtl-response');
         }
 
-        // Tables need per-cell treatment for mixed content
-        var cells = root.querySelectorAll('th, td');
-        for (var t = 0; t < cells.length; t++) {
-            applyDirection(cells[t]);
-        }
-        var tables = root.querySelectorAll('table');
-        for (var tb = 0; tb < tables.length; tb++) {
-            if (isArabicOrMixed(tables[tb].textContent || '')) {
-                tables[tb].style.direction = 'rtl';
-            } else {
-                tables[tb].style.direction = 'ltr';
+        // Tables need per-cell treatment for mixed content — but ONLY when not streaming.
+        // During streaming the cells are recreated on every token which causes inline
+        // style thrashing and visible flicker. CSS unicode-bidi:plaintext handles
+        // direction automatically until streaming finishes.
+        if (!_isStreaming) {
+            var cells = root.querySelectorAll('th, td');
+            for (var t = 0; t < cells.length; t++) {
+                applyDirection(cells[t]);
+            }
+            var tables = root.querySelectorAll('table');
+            for (var tb = 0; tb < tables.length; tb++) {
+                if (isArabicOrMixed(tables[tb].textContent || '')) {
+                    tables[tb].style.direction = 'rtl';
+                } else {
+                    tables[tb].style.direction = 'ltr';
+                }
             }
         }
     }
@@ -256,6 +261,9 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             _mdScanTimeout = setTimeout(function () {
                 _mdScanTimeout = null;
                 scanAll();
+                // Also scan Monaco inputs on every DOM mutation (e.g. switching
+                // chat threads recreates elements but fires no 'input' events).
+                processNonCodeMonacos();
             }, 200);
             // Each mutation means streaming is still active; schedule stabilize
             scheduleStabilize();
@@ -304,7 +312,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         // per paragraph from the first strong character (Arabic=RTL, Latin=LTR).
 
         // Antigravity + Cursor response containers
-        var respTags = ['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
+        var respTags = ['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'td', 'th'];
         var respContainerSels = ['.leading-relaxed.select-text', '.markdown-root .space-y-4'];
         var respCssSels = [];
         respContainerSels.forEach(function(c) {
@@ -323,8 +331,10 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
 
         // VS Code Copilot chat containers (rendered-markdown, etc.)
+        // td/th are included so table cells auto-detect direction during streaming
+        // without needing inline styles set by JS (which caused flicker).
         var mdSels = MD_CONTAINER_SELECTORS.map(function(s) {
-            return s + ' > p, ' + s + ' > li, ' + s + ' > h1, ' + s + ' > h2, ' + s + ' > h3, ' + s + ' > h4, ' + s + ' li';
+            return s + ' > p, ' + s + ' > li, ' + s + ' > h1, ' + s + ' > h2, ' + s + ' > h3, ' + s + ' > h4, ' + s + ' li, ' + s + ' td, ' + s + ' th';
         }).join(', ');
         css += mdSels + ' { ';
         css += 'unicode-bidi: plaintext !important; ';
@@ -445,27 +455,39 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
 
     // Dead code removed — origScanAll wrapper was a no-op.
 
-    // Use a lightweight event listener for typing (Monaco input)
+    // Use a lightweight event listener for typing (Monaco input).
+    // Always call processNonCodeMonacos — no has-class guard — so direction
+    // is updated correctly in both directions (LTR→RTL and RTL→LTR).
     document.addEventListener('input', function (e) {
         var target = e.target;
         if (!target || !target.closest) return;
         var monacoParent = target.closest('.monaco-editor');
         if (monacoParent && !isMainCodeEditor(monacoParent)) {
-            if (!monacoParent.classList.contains('copilot-rtl-v2')) {
-                processNonCodeMonacos();
-            }
+            // Defer by one rAF so Monaco has time to update .view-line
+            // elements before we read textContent.
+            requestAnimationFrame(function () { processNonCodeMonacos(); });
+        }
+    }, true);
+
+    // Also scan when the user focuses any Monaco chat input.
+    // This handles switching to an existing conversation without typing.
+    document.addEventListener('focusin', function (e) {
+        var target = e.target;
+        if (!target || !target.closest) return;
+        var monacoParent = target.closest('.monaco-editor');
+        if (monacoParent && !isMainCodeEditor(monacoParent)) {
+            processNonCodeMonacos();
         }
     }, true);
 
     // ── Periodic fallback scan ──
-    // Includes input detection so initial state is picked up even before the user types.
-    var _scanCount = 0;
-    var _scanTimer = setInterval(function () {
+    // Runs indefinitely at a low frequency so Monaco inputs are always in sync
+    // regardless of when conversations are opened or switched.
+    setInterval(function () {
         scanAll();
         processNonCodeMonacos();
         scanAntigravityInput();
-        if (++_scanCount >= 30) clearInterval(_scanTimer);
-    }, 2000);
+    }, 3000);
 
     // Initial input detection on load
     processNonCodeMonacos();
