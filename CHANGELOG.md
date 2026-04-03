@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7] - 2026-04-04
+
+### Added
+- **Live toggle without reload** — disabling or enabling the extension now takes effect within ~1.5 seconds without requiring a VS Code reload
+- The injected script polls a `copilot-rtl-state.json` file every 1.5 s; when the extension writes `{enabled: false}`, the script removes all injected styles and classes immediately (`shutdown()`), and when `{enabled: true}` is written it restores everything (`reinitialize()`)
+- Removed the "Reload VS Code to apply changes" prompt from the Enable and Disable commands
+
 ## [0.1.6] - 2026-04-03
 
 ### Fixed

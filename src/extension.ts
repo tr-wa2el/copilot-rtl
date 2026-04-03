@@ -7,12 +7,17 @@ const MARKER_START = '<!-- COPILOT-RTL-PATCH-START -->';
 const MARKER_END = '<!-- COPILOT-RTL-PATCH-END -->';
 const PATCH_JS_NAME = 'copilot-rtl-patch.js';
 const AGENT_PATCH_JS_NAME = 'copilot-rtl-agent-patch.js';
+const STATE_FILE_NAME = 'copilot-rtl-state.json';
 const STATE_KEY_DISABLED = 'copilotRtl.userDisabled';
 
 /** The JS that gets written to a standalone file (no inline script — avoids CSP). */
 function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): string {
     return `(function () {
     'use strict';
+
+    var _observer = null;
+    var _mainInterval = null;
+    var _enabled = true;
 
     const RTL_FONT_FAMILY  = ${JSON.stringify(fontFamily + ', sans-serif')};
     const RTL_FONT_SIZE    = ${JSON.stringify(fontSize + 'px')};
@@ -255,6 +260,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     }
 
     function observeMarkdown() {
+        if (_observer) { _observer.disconnect(); _observer = null; }
         var _mdScanTimeout = null;
         function scheduleMdScan() {
             // Trailing-edge debounce: reset timer on every mutation so the scan
@@ -273,13 +279,13 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             scheduleStabilize();
         }
 
-        var observer = new MutationObserver(scheduleMdScan);
+        _observer = new MutationObserver(scheduleMdScan);
 
         // characterData removed intentionally — every character streamed by
         // the AI was firing a mutation event, which was the main cause of
         // flicker and poor performance. childList alone is sufficient to
         // detect when new elements are added.
-        observer.observe(document.body, {
+        _observer.observe(document.body, {
             childList: true,
             subtree: true
         });
@@ -591,7 +597,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     // ── Periodic fallback scan ──
     // Runs indefinitely at a low frequency so Monaco inputs are always in sync
     // regardless of when conversations are opened or switched.
-    setInterval(function () {
+    _mainInterval = setInterval(function () {
         scanAll();
         processNonCodeMonacos();
         scanAntigravityInput();
@@ -600,6 +606,47 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     // Initial input detection on load
     processNonCodeMonacos();
     scanAntigravityInput();
+
+    // ── Live disable/enable via state file (no reload needed) ────────────
+    function shutdown() {
+        _enabled = false;
+        if (_observer) { _observer.disconnect(); _observer = null; }
+        if (_mainInterval) { clearInterval(_mainInterval); _mainInterval = null; }
+        var style = document.getElementById('copilot-rtl-styles');
+        if (style && style.parentNode) { style.parentNode.removeChild(style); }
+        document.querySelectorAll('.copilot-rtl-response').forEach(function(el) { el.classList.remove('copilot-rtl-response'); });
+        document.querySelectorAll('.copilot-rtl-v2').forEach(function(el) { el.classList.remove('copilot-rtl-v2'); });
+        document.querySelectorAll('.copilot-rtl-lexical').forEach(function(el) { el.classList.remove('copilot-rtl-lexical'); });
+        tryRestoreMonacoFont();
+    }
+
+    function reinitialize() {
+        _enabled = true;
+        injectStyles();
+        observeMarkdown();
+        if (_mainInterval) { clearInterval(_mainInterval); }
+        _mainInterval = setInterval(function () {
+            scanAll();
+            processNonCodeMonacos();
+            scanAntigravityInput();
+        }, 3000);
+        scanAll();
+        processNonCodeMonacos();
+        scanAntigravityInput();
+    }
+
+    // Poll copilot-rtl-state.json every 1.5 s — allows instant toggle without reload.
+    // This interval keeps running even after shutdown() so re-enable also works live.
+    setInterval(function () {
+        fetch('./copilot-rtl-state.json?t=' + Date.now(), { cache: 'no-store' })
+            .then(function(r) { return r.ok ? r.json() : Promise.reject(); })
+            .then(function(data) {
+                var nowEnabled = data.enabled !== false;
+                if (!nowEnabled && _enabled) { shutdown(); }
+                else if (nowEnabled && !_enabled) { reinitialize(); }
+            })
+            .catch(function() {});
+    }, 1500);
 
 }());
 `;
@@ -956,6 +1003,9 @@ async function enablePatch(htmlPath: string, fontFamily: string, fontSize: numbe
         // Always write/overwrite the JS file (updates font settings)
         await fsp.writeFile(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
 
+        // Write state file for immediate live toggle (no reload needed)
+        try { await fsp.writeFile(path.join(htmlDir, STATE_FILE_NAME), JSON.stringify({ enabled: true }), 'utf8'); } catch { /* ignore */ }
+
         let content = await fsp.readFile(htmlPath, 'utf8');
         const version = Date.now();
         const patch = buildPatchContent(version);
@@ -1037,6 +1087,9 @@ async function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight
 
 async function disablePatch(htmlPath: string): Promise<{ success: boolean; error?: string }> {
     try {
+        // Write state file first — running script sees it within 1.5s and shuts down (no reload needed)
+        try { await fsp.writeFile(path.join(path.dirname(htmlPath), STATE_FILE_NAME), JSON.stringify({ enabled: false }), 'utf8'); } catch { /* ignore */ }
+
         let content = await fsp.readFile(htmlPath, 'utf8');
 
         if (isPatched(content)) {
@@ -1172,7 +1225,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 if (result.success) {
                     await context.globalState.update(STATE_KEY_DISABLED, true);
                     await updateStatusBar();
-                    await promptReload('Copilot RTL disabled. Reload VS Code to apply changes.');
+                    vscode.window.showInformationMessage('Copilot RTL disabled.');
                 } else {
                     vscode.window.showErrorMessage(
                         `Copilot RTL: Failed to disable — ${result.error}. Try running VS Code as Administrator.`
@@ -1185,7 +1238,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 if (result.success) {
                     await context.globalState.update(STATE_KEY_DISABLED, false);
                     await updateStatusBar();
-                    await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
+                    vscode.window.showInformationMessage('Copilot RTL enabled.');
                 } else {
                     vscode.window.showErrorMessage(
                         `Copilot RTL: Failed to enable — ${result.error}. Try running VS Code as Administrator.`
@@ -1212,7 +1265,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (result.success) {
             await context.globalState.update(STATE_KEY_DISABLED, false);
             await updateStatusBar();
-            await promptReload('Copilot RTL enabled. Reload VS Code to apply changes.');
+            vscode.window.showInformationMessage('Copilot RTL enabled.');
         } else {
             vscode.window.showErrorMessage(
                 `Copilot RTL: Failed to enable — ${result.error}. Try running VS Code as Administrator.`
@@ -1234,7 +1287,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (result.success) {
             await context.globalState.update(STATE_KEY_DISABLED, true);
             await updateStatusBar();
-            await promptReload('Copilot RTL disabled. Reload VS Code to apply changes.');
+            vscode.window.showInformationMessage('Copilot RTL disabled.');
         } else {
             vscode.window.showErrorMessage(
                 `Copilot RTL: Failed to disable — ${result.error}. Try running VS Code as Administrator.`
