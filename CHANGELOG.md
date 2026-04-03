@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6] - 2026-04-03
+
+### Fixed
+- Monaco chat input now correctly applies the configured RTL font family and font size — font is applied via CSS on `.view-line span` and `[class*="mtk"]` for visual rendering, and via `updateOptions({fontFamily, fontSize, lineHeight})` on all non-code Monaco editor instances so Monaco's internal character-width metrics match the visual font
+- Word-wrap in the Monaco chat input now wraps at the correct position when using a custom font size — previously Monaco was wrapping based on the default font metrics while rendering a larger font, causing characters to overflow before the line break
+- Monaco instance lookup now iterates all editors via `monaco.editor.getEditors()` with `getContainerDomNode()` matching instead of fragile single-element DOM lookup
+- Added requirejs module cache walk as the most reliable method to obtain the Monaco API in VS Code's workbench context
+
 ## [0.1.5] - 2026-04-02
 
 ### Fixed

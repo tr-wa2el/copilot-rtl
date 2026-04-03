@@ -376,6 +376,8 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
         css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        // Apply font to Monaco's render spans for visual display.
+        // Word-wrap metrics are corrected via updateOptions() in tryApplyMonacoFont.
         css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
         css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
         // Protect Monaco code views inside AI response containers from inheriting RTL.
@@ -438,6 +440,89 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         return false;
     }
 
+    // ── Monaco font via updateOptions (fixes word-wrap metrics) ──
+    // CSS on .view-line spans makes the font LOOK correct, but Monaco's internal
+    // character-width cache still uses the old font, causing wrong word-wrap.
+    // updateOptions({fontFamily, fontSize}) updates Monaco's metrics so wrap is correct.
+    // We apply to ALL non-code editors so we don't need fragile DOM matching.
+    var _monacoOriginals = new WeakMap();
+
+    function getMonacoLib() {
+        try {
+            if (typeof monaco !== 'undefined' && monaco && monaco.editor) return monaco;
+        } catch(e) {}
+        // Walk requirejs module cache — most reliable in VS Code workbench
+        try {
+            var ctx = window.require
+                && window.require.s
+                && window.require.s.contexts
+                && window.require.s.contexts._;
+            var defined = ctx && ctx.defined;
+            if (defined) {
+                var keys = Object.keys(defined);
+                for (var ki = 0; ki < keys.length; ki++) {
+                    var mod = defined[keys[ki]];
+                    if (mod && mod.editor && typeof mod.editor.getEditors === 'function') return mod;
+                }
+            }
+        } catch(e) {}
+        try {
+            var req = (typeof require !== 'undefined' ? require : null) || window.require;
+            if (req) { var m = req('vs/editor/editor.main'); if (m && m.editor) return m; }
+        } catch(e) {}
+        return null;
+    }
+
+    function tryApplyMonacoFont() {
+        var lib = getMonacoLib();
+        if (!lib) return;
+        try {
+            var editors = lib.editor.getEditors();
+            var fs = parseFloat(RTL_FONT_SIZE);
+            for (var i = 0; i < editors.length; i++) {
+                try {
+                    var dn = editors[i].getContainerDomNode
+                        ? editors[i].getContainerDomNode()
+                        : editors[i].getDomNode();
+                    if (dn && isMainCodeEditor(dn)) continue;
+                    if (!_monacoOriginals.has(editors[i])) {
+                        var raw = editors[i].getRawOptions ? editors[i].getRawOptions() : {};
+                        _monacoOriginals.set(editors[i], {
+                            fontSize:   raw.fontSize,
+                            fontFamily: raw.fontFamily,
+                            lineHeight: raw.lineHeight
+                        });
+                    }
+                    editors[i].updateOptions({
+                        fontSize:   fs,
+                        fontFamily: RTL_FONT_NAME,
+                        lineHeight: Math.round(fs * parseFloat(RTL_LINE_HEIGHT))
+                    });
+                } catch(e) {}
+            }
+        } catch(e) {}
+    }
+
+    function tryRestoreMonacoFont() {
+        var lib = getMonacoLib();
+        if (!lib) return;
+        try {
+            var editors = lib.editor.getEditors();
+            for (var i = 0; i < editors.length; i++) {
+                try {
+                    var dn = editors[i].getContainerDomNode
+                        ? editors[i].getContainerDomNode()
+                        : editors[i].getDomNode();
+                    if (dn && isMainCodeEditor(dn)) continue;
+                    if (_monacoOriginals.has(editors[i])) {
+                        editors[i].updateOptions(_monacoOriginals.get(editors[i]));
+                        _monacoOriginals.delete(editors[i]);
+                    }
+                } catch(e) {}
+            }
+        } catch(e) {}
+    }
+
     // True while we are inside a double-rAF triggered by an 'input' event.
     // Used to distinguish "momentarily empty during Monaco re-render" from
     // "genuinely empty input" so the empty guard doesn't lock RTL on new conversations.
@@ -465,8 +550,10 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
 
             if (arabic) {
                 editor.classList.add('copilot-rtl-v2');
+                tryApplyMonacoFont();
             } else {
                 editor.classList.remove('copilot-rtl-v2');
+                tryRestoreMonacoFont();
             }
         }
     }
