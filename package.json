@@ -9,11 +9,11 @@
     "type": "git",
     "url": "https://github.com/tr-wa2el/copilot-rtl"
   },
-  "keywords": ["rtl", "arabic", "persian", "copilot", "WaelAboSamra"],
+  "keywords": ["rtl", "right-to-left", "arabic", "persian", "copilot", "chat", "cursor", "antigravity", "WaelAboSamra"],
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
+  "categories": ["AI", "Other"],
   "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "icon": "images/icon.png",

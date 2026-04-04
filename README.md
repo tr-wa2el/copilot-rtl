@@ -1,6 +1,7 @@
 # Copilot RTL
 
-Adds automatic **RTL (Right-to-Left)** support to VS Code Copilot chat for Arabic and mixed Arabic/English text.
+Adds automatic **RTL (Right-to-Left)** support to Copilot chat for Arabic and mixed Arabic/English text.
+Works with **VS Code**, **Cursor**, and **Antigravity**.
 
 - Arabic or mixed text → RTL direction + your chosen font & size
 - English-only text → LTR with optional custom font & size
@@ -68,7 +69,16 @@ After changing any setting, VS Code will automatically prompt you to **Reload** 
 
 ---
 
-## Install from VSIX
+## Install
+
+### From Marketplace
+
+| Store | Link |
+|---|---|
+| VS Code Marketplace | [WaelAboSamra.copilot-rtl](https://marketplace.visualstudio.com/items?itemName=WaelAboSamra.copilot-rtl) |
+| Open VSX (Cursor / Antigravity) | [WaelAboSamra/copilot-rtl](https://open-vsx.org/extension/WaelAboSamra/copilot-rtl) |
+
+### From VSIX
 
 ```
 code --install-extension copilot-rtl-x.x.x.vsix
