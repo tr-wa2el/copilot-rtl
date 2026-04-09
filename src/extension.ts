@@ -66,20 +66,46 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         if (el.tagName === 'PRE' || el.tagName === 'CODE') {
             el.style.direction = 'ltr';
             el.style.fontFamily = '';
+            el.style.unicodeBidi = '';
             return;
         }
         if (isArabicOrMixed(el.textContent || '')) {
             el.style.direction = 'rtl';
+            el.style.unicodeBidi = 'embed';
             el.style.fontFamily = RTL_FONT_FAMILY;
             el.style.fontSize = RTL_FONT_SIZE;
             el.style.lineHeight = RTL_LINE_HEIGHT;
             el.style.textAlign = 'right';
         } else {
             el.style.direction = 'ltr';
+            el.style.unicodeBidi = '';
             el.style.fontFamily = LTR_FONT_FAMILY;
             el.style.fontSize = LTR_FONT_SIZE;
             el.style.lineHeight = LTR_LINE_HEIGHT;
             el.style.textAlign = '';
+        }
+    }
+
+    function markMixedTextBlocks(root) {
+        var blocks = root.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote');
+        for (var i = 0; i < blocks.length; i++) {
+            var block = blocks[i];
+            if (block.tagName === 'PRE' || block.tagName === 'CODE') { continue; }
+            if (block.closest('pre') || block.closest('code')) { continue; }
+            if (isArabicOrMixed(block.textContent || '')) {
+                // Use setProperty('important') to beat ANY CSS rule including
+                // unicode-bidi:plaintext set by the workbench or our own mdSels.
+                block.style.setProperty('direction', 'rtl', 'important');
+                block.style.setProperty('unicode-bidi', 'embed', 'important');
+                block.style.setProperty('text-align', 'right', 'important');
+                block.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
+                block.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
+                block.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
+            } else {
+                block.style.removeProperty('direction');
+                block.style.removeProperty('unicode-bidi');
+                block.style.removeProperty('text-align');
+            }
         }
     }
 
@@ -129,6 +155,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                     tables[tb].style.direction = 'ltr';
                 }
             }
+            markMixedTextBlocks(root);
         }
     }
 
@@ -183,6 +210,10 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                 // Non-streaming: allow removal
                 if (!containerArabic) {
                     container.classList.remove('copilot-rtl-response');
+                }
+
+                if (!_isStreaming) {
+                    markMixedTextBlocks(container);
                 }
             });
         });
@@ -367,11 +398,22 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
-        // ──────── Class-based RTL (container only) ──────────────────
-        // Only set direction on the CONTAINER for list markers, ol counters, etc.
-        // Do NOT set direction on children (p, li, h1-h6) — that would override
-        // unicode-bidi:plaintext and force English paragraphs to RTL.
+        // ──────── Class-based RTL (container + ALL paragraph children) ──────────
+        // .copilot-rtl-response sets RTL on the container.
+        // The child rule uses unicode-bidi:embed (NOT plaintext) so it respects
+        // direction:rtl — this fixes paragraphs that START with English but contain Arabic.
+        // Specificity: .copilot-rtl-response X (0,1,1) ties the mdSels rule but comes
+        // LATER in the stylesheet, so it wins the cascade.
+        // Cursor-specific selectors have higher specificity (0,3,1) to beat (0,2,1).
         css += '.copilot-rtl-response { direction: rtl !important; }';
+        var rtlChildTags = ['p','li','h1','h2','h3','h4','h5','h6','blockquote'];
+        var rtlChildSels = [];
+        rtlChildTags.forEach(function(t) { rtlChildSels.push('.copilot-rtl-response ' + t); });
+        rtlChildTags.forEach(function(t) {
+            rtlChildSels.push('.leading-relaxed.select-text.copilot-rtl-response ' + t);
+            rtlChildSels.push('.markdown-root .space-y-4.copilot-rtl-response ' + t);
+        });
+        css += rtlChildSels.join(', ') + ' { direction: rtl !important; unicode-bidi: embed !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
@@ -675,12 +717,14 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
     function applyRtlStyle(el, arabic) {
         if (arabic) {
             el.style.direction = 'rtl';
+            el.style.unicodeBidi = 'embed';
             el.style.textAlign = 'right';
             el.style.fontFamily = RTL_FONT_FAMILY;
             el.style.fontSize = RTL_FONT_SIZE;
             el.style.lineHeight = RTL_LINE_HEIGHT;
         } else {
             el.style.direction = 'ltr';
+            el.style.unicodeBidi = '';
             el.style.textAlign = '';
             el.style.fontFamily = LTR_FONT_FAMILY;
             el.style.fontSize = LTR_FONT_SIZE;
@@ -712,6 +756,28 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
             // Non-streaming: allow removal
             if (!containerArabic) {
                 container.classList.remove('copilot-rtl-response');
+            }
+
+            // Per-paragraph inline styles — bypasses any CSS cascade issue with
+            // unicode-bidi:plaintext. setProperty('important') wins over ALL CSS.
+            if (!_isStreaming) {
+                var blocks = container.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote');
+                for (var bi = 0; bi < blocks.length; bi++) {
+                    var blk = blocks[bi];
+                    if (blk.closest('pre') || blk.closest('code')) { continue; }
+                    if (isArabic(blk.textContent || '')) {
+                        blk.style.setProperty('direction', 'rtl', 'important');
+                        blk.style.setProperty('unicode-bidi', 'embed', 'important');
+                        blk.style.setProperty('text-align', 'right', 'important');
+                        blk.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
+                        blk.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
+                        blk.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
+                    } else {
+                        blk.style.removeProperty('direction');
+                        blk.style.removeProperty('unicode-bidi');
+                        blk.style.removeProperty('text-align');
+                    }
+                }
             }
         });
 
@@ -759,8 +825,17 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
-        // Class-based RTL (container only — no child direction override)
+        // Class-based RTL — same approach as injectStyles: force ALL p/li/h* inside
+        // .copilot-rtl-response to direction:rtl + unicode-bidi:embed so paragraphs
+        // that START with English but contain Arabic still render as RTL.
         css += '.copilot-rtl-response { direction: rtl !important; }';
+        var agRtlTags = ['p','li','h1','h2','h3','h4','h5','h6','blockquote'];
+        var agRtlSels = [];
+        agRtlTags.forEach(function(t) { agRtlSels.push('.copilot-rtl-response ' + t); });
+        agRtlTags.forEach(function(t) {
+            agRtlSels.push('.leading-relaxed.select-text.copilot-rtl-response ' + t);
+        });
+        css += agRtlSels.join(', ') + ' { direction: rtl !important; unicode-bidi: embed !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
