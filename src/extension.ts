@@ -166,7 +166,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     }
 
     // ── Streaming stabilization ──────────────────────────────────────────
-    // After the AI finishes streaming (no mutations for 800ms), mark
+    // After the AI finishes streaming (no mutations for 400ms), mark
     // streaming as ended and do a final clean re-scan.
     var _stabilizeTimeout = null;
     function scheduleStabilize() {
@@ -178,7 +178,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             // Final clean re-scan — can now remove classes if needed
             scanAllMarkdown();
             scanAntigravity();
-        }, 800);
+        }, 400);
     }
 
     // ── Antigravity / Cursor chat support (React + Tailwind + Lexical) ──
@@ -305,7 +305,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                 // Also scan Monaco inputs on every DOM mutation (e.g. switching
                 // chat threads recreates elements but fires no 'input' events).
                 processNonCodeMonacos();
-            }, 300);
+            }, 150);
             // Each mutation means streaming is still active; schedule stabilize
             scheduleStabilize();
         }
@@ -894,7 +894,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
     }
 
     // ── Streaming stabilization ──────────────────────────────────────────
-    // After the AI finishes streaming (no mutations for 800ms), mark
+    // After the AI finishes streaming (no mutations for 400ms), mark
     // streaming as ended and do a final clean re-scan.
     var _stabilizeTimeout = null;
     function scheduleStabilize() {
@@ -905,23 +905,17 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
             _isStreaming = false;
             // Final clean re-scan — can now remove classes if needed
             processMessages();
-        }, 800);
+        }, 400);
     }
 
     // ── Debounced observer ───────────────────────────────────────────────
     var _scanTimeout = null;
     function scheduleScan() {
-        // Trailing-edge debounce: reset timer on every mutation so the scan
-        // only fires after mutations have settled. This prevents repeated
-        // processMessages() calls during streaming which caused flicker in
-        // tables and bullet lists.
         if (_scanTimeout) { clearTimeout(_scanTimeout); }
         _scanTimeout = setTimeout(function () {
             _scanTimeout = null;
-            // Only scan AI responses — NOT processInput() — to prevent flickering
-            // caused by direction/font toggling on each streamed token from the AI.
             processMessages();
-        }, 300);
+        }, 150);
         // Each mutation means streaming is still active; schedule stabilize
         scheduleStabilize();
     }
