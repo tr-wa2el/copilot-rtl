@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.8] - 2026-04-09
+
+### Added
+- **`copilotRtl.textAlign` setting** — choose between `justify` (default) and `right` alignment for RTL Arabic text in Copilot chat
+
+### Fixed
+- Mixed Arabic/English paragraphs that **start with English** now correctly render as RTL — root cause was `unicode-bidi: plaintext` ignoring `direction: rtl`; fixed by applying inline `setProperty('direction', 'rtl', 'important')` and `unicode-bidi: embed` directly on each Arabic-containing paragraph
+- RTL correction now applies to **Antigravity and Cursor** agent chat panel with the same inline-style approach
+- Reduced RTL apply delay from ~1.1s to ~550ms (stabilize timeout: 800ms → 400ms, debounce: 300ms → 150ms)
+
 ## [0.1.7] - 2026-04-04
 
 ### Added

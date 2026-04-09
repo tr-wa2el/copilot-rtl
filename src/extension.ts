@@ -11,7 +11,7 @@ const STATE_FILE_NAME = 'copilot-rtl-state.json';
 const STATE_KEY_DISABLED = 'copilotRtl.userDisabled';
 
 /** The JS that gets written to a standalone file (no inline script — avoids CSP). */
-function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): string {
+function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, textAlign: string): string {
     return `(function () {
     'use strict';
 
@@ -26,6 +26,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     const LTR_FONT_FAMILY  = ${JSON.stringify(ltrFontFamily)};
     const LTR_FONT_SIZE    = ${JSON.stringify(ltrFontSize > 0 ? ltrFontSize + 'px' : '')};
     const LTR_LINE_HEIGHT  = ${JSON.stringify(ltrLineHeight > 0 ? String(ltrLineHeight) : '')};
+    const RTL_TEXT_ALIGN   = ${JSON.stringify(textAlign)};
 
     // Warn in DevTools console if the requested font is not available
     document.fonts.ready.then(function () {
@@ -75,7 +76,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             el.style.fontFamily = RTL_FONT_FAMILY;
             el.style.fontSize = RTL_FONT_SIZE;
             el.style.lineHeight = RTL_LINE_HEIGHT;
-            el.style.textAlign = 'right';
+            el.style.textAlign = RTL_TEXT_ALIGN;
         } else {
             el.style.direction = 'ltr';
             el.style.unicodeBidi = '';
@@ -97,7 +98,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                 // unicode-bidi:plaintext set by the workbench or our own mdSels.
                 block.style.setProperty('direction', 'rtl', 'important');
                 block.style.setProperty('unicode-bidi', 'embed', 'important');
-                block.style.setProperty('text-align', 'right', 'important');
+                block.style.setProperty('text-align', RTL_TEXT_ALIGN, 'important');
                 block.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
                 block.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
                 block.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
@@ -271,7 +272,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                 var child = children[i];
                 var childArabic = isArabicOrMixed(child.textContent || '');
                 child.style.direction = childArabic ? 'rtl' : (arabic ? 'rtl' : 'ltr');
-                child.style.textAlign = childArabic ? 'right' : '';
+                child.style.textAlign = childArabic ? RTL_TEXT_ALIGN : '';
                 if (arabic) {
                     child.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
                     child.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
@@ -413,7 +414,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             rtlChildSels.push('.leading-relaxed.select-text.copilot-rtl-response ' + t);
             rtlChildSels.push('.markdown-root .space-y-4.copilot-rtl-response ' + t);
         });
-        css += rtlChildSels.join(', ') + ' { direction: rtl !important; unicode-bidi: embed !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += rtlChildSels.join(', ') + ' { direction: rtl !important; unicode-bidi: embed !important; text-align: ' + RTL_TEXT_ALIGN + ' !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
@@ -695,7 +696,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
 }
 
 /** Build the JS for Antigravity's agent chat panel (React + Tailwind + Lexical). */
-function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): string {
+function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, textAlign: string): string {
     return `(function () {
     'use strict';
 
@@ -706,6 +707,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
     const LTR_FONT_FAMILY  = ${JSON.stringify(ltrFontFamily)};
     const LTR_FONT_SIZE    = ${JSON.stringify(ltrFontSize > 0 ? ltrFontSize + 'px' : '')};
     const LTR_LINE_HEIGHT  = ${JSON.stringify(ltrLineHeight > 0 ? String(ltrLineHeight) : '')};
+    const RTL_TEXT_ALIGN   = ${JSON.stringify(textAlign)};
 
     // Arabic Unicode blocks
     var ARABIC_RE = /[\\u0600-\\u06FF\\u0750-\\u077F\\uFB50-\\uFDFF\\uFE70-\\uFEFF]/;
@@ -718,7 +720,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         if (arabic) {
             el.style.direction = 'rtl';
             el.style.unicodeBidi = 'embed';
-            el.style.textAlign = 'right';
+            el.style.textAlign = RTL_TEXT_ALIGN;
             el.style.fontFamily = RTL_FONT_FAMILY;
             el.style.fontSize = RTL_FONT_SIZE;
             el.style.lineHeight = RTL_LINE_HEIGHT;
@@ -768,7 +770,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
                     if (isArabic(blk.textContent || '')) {
                         blk.style.setProperty('direction', 'rtl', 'important');
                         blk.style.setProperty('unicode-bidi', 'embed', 'important');
-                        blk.style.setProperty('text-align', 'right', 'important');
+                        blk.style.setProperty('text-align', RTL_TEXT_ALIGN, 'important');
                         blk.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
                         blk.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
                         blk.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
@@ -835,7 +837,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         agRtlTags.forEach(function(t) {
             agRtlSels.push('.leading-relaxed.select-text.copilot-rtl-response ' + t);
         });
-        css += agRtlSels.join(', ') + ' { direction: rtl !important; unicode-bidi: embed !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += agRtlSels.join(', ') + ' { direction: rtl !important; unicode-bidi: embed !important; text-align: ' + RTL_TEXT_ALIGN + ' !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
@@ -879,7 +881,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
                 var child = children[i];
                 var childArabic = isArabic(child.textContent || '');
                 child.style.direction = childArabic ? 'rtl' : (arabic ? 'rtl' : 'ltr');
-                child.style.textAlign = childArabic ? 'right' : '';
+                child.style.textAlign = childArabic ? RTL_TEXT_ALIGN : '';
                 if (arabic) {
                     child.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
                     child.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
@@ -1051,7 +1053,7 @@ function escapeForRegex(str: string): string {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function getSettings(): { fontFamily: string; fontSize: number; lineHeight: number; ltrFontFamily: string; ltrFontSize: number; ltrLineHeight: number; autoInputDirection: boolean } {
+function getSettings(): { fontFamily: string; fontSize: number; lineHeight: number; ltrFontFamily: string; ltrFontSize: number; ltrLineHeight: number; autoInputDirection: boolean; textAlign: string } {
     const cfg = vscode.workspace.getConfiguration('copilotRtl');
     return {
         fontFamily: cfg.get<string>('fontFamily', 'vazirmatn'),
@@ -1061,16 +1063,17 @@ function getSettings(): { fontFamily: string; fontSize: number; lineHeight: numb
         ltrFontSize: cfg.get<number>('ltrFontSize', 0),
         ltrLineHeight: cfg.get<number>('ltrLineHeight', 0),
         autoInputDirection: cfg.get<boolean>('autoInputDirection', true),
+        textAlign: cfg.get<string>('textAlign', 'justify'),
     };
 }
 
-async function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): Promise<{ success: boolean; error?: string }> {
+async function enablePatch(htmlPath: string, fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, textAlign: string): Promise<{ success: boolean; error?: string }> {
     try {
         const htmlDir = path.dirname(htmlPath);
         const jsPath = path.join(htmlDir, PATCH_JS_NAME);
 
         // Always write/overwrite the JS file (updates font settings)
-        await fsp.writeFile(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+        await fsp.writeFile(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign), 'utf8');
 
         // Write state file for immediate live toggle (no reload needed)
         try { await fsp.writeFile(path.join(htmlDir, STATE_FILE_NAME), JSON.stringify({ enabled: true }), 'utf8'); } catch { /* ignore */ }
@@ -1103,7 +1106,7 @@ async function enablePatch(htmlPath: string, fontFamily: string, fontSize: numbe
         await fsp.writeFile(htmlPath, content, 'utf8');
 
         // Also patch the Antigravity agent panel if it exists
-        await enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+        await enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
 
         return { success: true };
     } catch (err: unknown) {
@@ -1112,7 +1115,7 @@ async function enablePatch(htmlPath: string, fontFamily: string, fontSize: numbe
     }
 }
 
-async function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number): Promise<{ success: boolean; error?: string }> {
+async function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, textAlign: string): Promise<{ success: boolean; error?: string }> {
     const agentPath = getAgentHtmlPath();
     if (!agentPath) { return { success: false, error: 'Agent HTML not found' }; }
 
@@ -1121,7 +1124,7 @@ async function enableAgentPatch(fontFamily: string, fontSize: number, lineHeight
         const jsPath = path.join(htmlDir, AGENT_PATCH_JS_NAME);
 
         // Write the agent-specific JS
-        await fsp.writeFile(jsPath, buildAgentScriptContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight), 'utf8');
+        await fsp.writeFile(jsPath, buildAgentScriptContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign), 'utf8');
 
         let content = await fsp.readFile(agentPath, 'utf8');
         const version = Date.now();
@@ -1223,8 +1226,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             if (!isPatched(content)) {
                 // Only auto-enable if the user hasn't explicitly disabled it
                 if (!userDisabled) {
-                    const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-                    const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+                    const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign } = getSettings();
+                    const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
                     if (result.success) {
                         promptReload('Copilot RTL installed and enabled automatically. Reload to apply.');
                     }
@@ -1233,9 +1236,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 // Already patched — fully re-patch (HTML + JS) so extension updates
                 // take effect. enablePatch() removes the old patch and adds a new one
                 // with a fresh ?v=timestamp, ensuring the browser loads the latest JS.
-                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
+                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign } = getSettings();
                 try {
-                    await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+                    await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
                 } catch {
                     // ignore — user can still use the manual enable command
                 }
@@ -1302,8 +1305,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 }
             } else {
                 // Enable
-                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-                const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+                const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign } = getSettings();
+                const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
                 if (result.success) {
                     await context.globalState.update(STATE_KEY_DISABLED, false);
                     await updateStatusBar();
@@ -1329,8 +1332,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             return;
         }
 
-        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-        const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign } = getSettings();
+        const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
         if (result.success) {
             await context.globalState.update(STATE_KEY_DISABLED, false);
             await updateStatusBar();
@@ -1394,8 +1397,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             const content = await fsp.readFile(htmlPath, 'utf8');
             if (!isPatched(content)) { return; }  // only update if already enabled
         } catch { return; }
-        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight } = getSettings();
-        const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight);
+        const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign } = getSettings();
+        const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
         if (result.success) {
             await updateStatusBar();
             await promptReload('Copilot RTL: Settings updated. Reload to apply.');

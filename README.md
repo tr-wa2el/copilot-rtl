@@ -54,6 +54,7 @@ Open the Command Palette (`Ctrl+Shift+P`) and run:
 | `copilotRtl.fontFamily` | `vazirmatn` | Font for Arabic text (e.g. `Cairo`, `Tahoma`, `Arial`) |
 | `copilotRtl.fontSize` | `13` | Font size in pixels (8–40) |
 | `copilotRtl.lineHeight` | `1.8` | Line spacing for Arabic text (1–4) |
+| `copilotRtl.textAlign` | `justify` | Text alignment for Arabic text: `justify` or `right` |
 
 ### English (LTR) text
 

@@ -2,7 +2,7 @@
   "name": "copilot-rtl",
   "displayName": "Copilot RTL",
   "description": "change the direction of copilot chat to right-to-left for Arabic",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "WaelAboSamra",
   "license": "MIT",
   "repository": {
@@ -63,6 +63,16 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically switch the chat input box direction to RTL when Arabic text is detected, and back to LTR otherwise."
+        },
+        "copilotRtl.textAlign": {
+          "type": "string",
+          "default": "justify",
+          "enum": ["justify", "right"],
+          "enumDescriptions": [
+            "Stretch text to fill the full line width (justified)",
+            "Align text to the right edge"
+          ],
+          "description": "Text alignment for RTL Arabic content in Copilot chat."
         }
       }
     },
