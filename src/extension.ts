@@ -103,9 +103,11 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                 block.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
                 block.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
             } else {
-                block.style.removeProperty('direction');
-                block.style.removeProperty('unicode-bidi');
-                block.style.removeProperty('text-align');
+                // Force non-Arabic blocks back to LTR so one Arabic line
+                // does not flip the whole list/section direction.
+                block.style.setProperty('direction', 'ltr', 'important');
+                block.style.setProperty('unicode-bidi', 'plaintext', 'important');
+                block.style.setProperty('text-align', 'left', 'important');
             }
         }
     }
@@ -399,22 +401,9 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
-        // ──────── Class-based RTL (container + ALL paragraph children) ──────────
-        // .copilot-rtl-response sets RTL on the container.
-        // The child rule uses unicode-bidi:embed (NOT plaintext) so it respects
-        // direction:rtl — this fixes paragraphs that START with English but contain Arabic.
-        // Specificity: .copilot-rtl-response X (0,1,1) ties the mdSels rule but comes
-        // LATER in the stylesheet, so it wins the cascade.
-        // Cursor-specific selectors have higher specificity (0,3,1) to beat (0,2,1).
-        css += '.copilot-rtl-response { direction: rtl !important; }';
-        var rtlChildTags = ['p','li','h1','h2','h3','h4','h5','h6','blockquote'];
-        var rtlChildSels = [];
-        rtlChildTags.forEach(function(t) { rtlChildSels.push('.copilot-rtl-response ' + t); });
-        rtlChildTags.forEach(function(t) {
-            rtlChildSels.push('.leading-relaxed.select-text.copilot-rtl-response ' + t);
-            rtlChildSels.push('.markdown-root .space-y-4.copilot-rtl-response ' + t);
-        });
-        css += rtlChildSels.join(', ') + ' { direction: rtl !important; unicode-bidi: embed !important; text-align: ' + RTL_TEXT_ALIGN + ' !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        // .copilot-rtl-response is now used as a streaming marker only.
+        // Per-block plaintext direction rules already handle each paragraph/list
+        // item independently, which reduces flicker during partial streaming.
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
@@ -522,66 +511,97 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         return null;
     }
 
-    function tryApplyMonacoFont() {
-        var lib = getMonacoLib();
-        if (!lib) return;
+    function getEditorDomNode(editorInstance) {
         try {
-            var editors = lib.editor.getEditors();
+            return editorInstance.getContainerDomNode
+                ? editorInstance.getContainerDomNode()
+                : editorInstance.getDomNode();
+        } catch(e) {
+            return null;
+        }
+    }
+
+    function applyMonacoFontFor(editorInstance) {
+        if (!editorInstance) return;
+        try {
             var fs = parseFloat(RTL_FONT_SIZE);
-            for (var i = 0; i < editors.length; i++) {
-                try {
-                    var dn = editors[i].getContainerDomNode
-                        ? editors[i].getContainerDomNode()
-                        : editors[i].getDomNode();
-                    if (dn && isMainCodeEditor(dn)) continue;
-                    if (!_monacoOriginals.has(editors[i])) {
-                        var raw = editors[i].getRawOptions ? editors[i].getRawOptions() : {};
-                        _monacoOriginals.set(editors[i], {
-                            fontSize:   raw.fontSize,
-                            fontFamily: raw.fontFamily,
-                            lineHeight: raw.lineHeight
-                        });
-                    }
-                    editors[i].updateOptions({
-                        fontSize:   fs,
-                        fontFamily: RTL_FONT_NAME,
-                        lineHeight: Math.round(fs * parseFloat(RTL_LINE_HEIGHT))
-                    });
-                } catch(e) {}
+            var lh = parseFloat(RTL_LINE_HEIGHT);
+            if (!(fs > 0) || !(lh > 0)) return;
+
+            if (!_monacoOriginals.has(editorInstance)) {
+                var raw = editorInstance.getRawOptions ? editorInstance.getRawOptions() : {};
+                _monacoOriginals.set(editorInstance, {
+                    fontSize: raw.fontSize,
+                    fontFamily: raw.fontFamily,
+                    lineHeight: raw.lineHeight,
+                    wrappingStrategy: raw.wrappingStrategy,
+                    allowVariableFonts: raw.allowVariableFonts
+                });
+            }
+
+            editorInstance.updateOptions({
+                fontSize: fs,
+                fontFamily: RTL_FONT_FAMILY,
+                lineHeight: Math.round(fs * lh),
+                wrappingStrategy: 'advanced',
+                allowVariableFonts: true
+            });
+        } catch(e) {}
+    }
+
+    function restoreMonacoFontFor(editorInstance) {
+        if (!editorInstance) return;
+        try {
+            if (_monacoOriginals.has(editorInstance)) {
+                editorInstance.updateOptions(_monacoOriginals.get(editorInstance));
+                _monacoOriginals.delete(editorInstance);
             }
         } catch(e) {}
     }
 
-    function tryRestoreMonacoFont() {
+    function restoreAllNonCodeMonacoFonts() {
         var lib = getMonacoLib();
         if (!lib) return;
         try {
             var editors = lib.editor.getEditors();
             for (var i = 0; i < editors.length; i++) {
-                try {
-                    var dn = editors[i].getContainerDomNode
-                        ? editors[i].getContainerDomNode()
-                        : editors[i].getDomNode();
-                    if (dn && isMainCodeEditor(dn)) continue;
-                    if (_monacoOriginals.has(editors[i])) {
-                        editors[i].updateOptions(_monacoOriginals.get(editors[i]));
-                        _monacoOriginals.delete(editors[i]);
-                    }
-                } catch(e) {}
+                var dn = getEditorDomNode(editors[i]);
+                if (dn && isMainCodeEditor(dn)) continue;
+                restoreMonacoFontFor(editors[i]);
             }
         } catch(e) {}
     }
 
-    // True while we are inside a double-rAF triggered by an 'input' event.
-    // Used to distinguish "momentarily empty during Monaco re-render" from
-    // "genuinely empty input" so the empty guard doesn't lock RTL on new conversations.
-    var _monacoTyping = false;
+    function findMonacoInstanceForDom(monacoDom, editorRecords) {
+        for (var i = 0; i < editorRecords.length; i++) {
+            var rec = editorRecords[i];
+            if (!rec.domNode) continue;
+            if (rec.domNode === monacoDom) return rec.instance;
+            if (rec.domNode.contains(monacoDom) || monacoDom.contains(rec.domNode)) return rec.instance;
+        }
+        return null;
+    }
 
     function processNonCodeMonacos() {
+        var editorRecords = [];
+        var lib = getMonacoLib();
+        if (lib) {
+            try {
+                var monacoEditors = lib.editor.getEditors();
+                for (var i = 0; i < monacoEditors.length; i++) {
+                    var dn = getEditorDomNode(monacoEditors[i]);
+                    if (!dn || isMainCodeEditor(dn)) continue;
+                    editorRecords.push({ instance: monacoEditors[i], domNode: dn });
+                }
+            } catch(e) {}
+        }
+
         var allMonacos = document.querySelectorAll('.monaco-editor');
         for (var m = 0; m < allMonacos.length; m++) {
             var editor = allMonacos[m];
             if (isMainCodeEditor(editor)) continue;
+
+            var editorInstance = findMonacoInstanceForDom(editor, editorRecords);
 
             // Read ONLY from .view-lines so we don't pick up placeholder text,
             // aria labels, decorations, or surrounding DOM that isn't the typed text.
@@ -599,13 +619,18 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
 
             if (arabic) {
                 editor.classList.add('copilot-rtl-v2');
-                tryApplyMonacoFont();
+                applyMonacoFontFor(editorInstance);
             } else {
                 editor.classList.remove('copilot-rtl-v2');
-                tryRestoreMonacoFont();
+                restoreMonacoFontFor(editorInstance);
             }
         }
     }
+
+    // True while we are inside a double-rAF triggered by an 'input' event.
+    // Used to distinguish "momentarily empty during Monaco re-render" from
+    // "genuinely empty input" so the empty guard doesn't lock RTL on new conversations.
+    var _monacoTyping = false;
 
     // Use a lightweight event listener for typing (Monaco input).
     // Double rAF: Monaco needs 2 frames to fully update .view-line elements
@@ -660,7 +685,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         document.querySelectorAll('.copilot-rtl-response').forEach(function(el) { el.classList.remove('copilot-rtl-response'); });
         document.querySelectorAll('.copilot-rtl-v2').forEach(function(el) { el.classList.remove('copilot-rtl-v2'); });
         document.querySelectorAll('.copilot-rtl-lexical').forEach(function(el) { el.classList.remove('copilot-rtl-lexical'); });
-        tryRestoreMonacoFont();
+        restoreAllNonCodeMonacoFonts();
     }
 
     function reinitialize() {
@@ -775,9 +800,10 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
                         blk.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
                         blk.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
                     } else {
-                        blk.style.removeProperty('direction');
-                        blk.style.removeProperty('unicode-bidi');
-                        blk.style.removeProperty('text-align');
+                        // Keep non-Arabic items LTR even inside RTL-marked containers.
+                        blk.style.setProperty('direction', 'ltr', 'important');
+                        blk.style.setProperty('unicode-bidi', 'plaintext', 'important');
+                        blk.style.setProperty('text-align', 'left', 'important');
                     }
                 }
             }
@@ -827,17 +853,9 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
-        // Class-based RTL — same approach as injectStyles: force ALL p/li/h* inside
-        // .copilot-rtl-response to direction:rtl + unicode-bidi:embed so paragraphs
-        // that START with English but contain Arabic still render as RTL.
-        css += '.copilot-rtl-response { direction: rtl !important; }';
-        var agRtlTags = ['p','li','h1','h2','h3','h4','h5','h6','blockquote'];
-        var agRtlSels = [];
-        agRtlTags.forEach(function(t) { agRtlSels.push('.copilot-rtl-response ' + t); });
-        agRtlTags.forEach(function(t) {
-            agRtlSels.push('.leading-relaxed.select-text.copilot-rtl-response ' + t);
-        });
-        css += agRtlSels.join(', ') + ' { direction: rtl !important; unicode-bidi: embed !important; text-align: ' + RTL_TEXT_ALIGN + ' !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        // .copilot-rtl-response is now a streaming marker only.
+        // Bot response paragraphs and list items are already styled via the
+        // always-active plaintext rules above, reducing flicker on lists.
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
