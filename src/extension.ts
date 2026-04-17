@@ -410,14 +410,20 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
         // ──────── Monaco chat input RTL ──────────────────────────────────
+        // We cannot access Monaco's editor API in modern VS Code (ESM).
+        // Changing font-size on the rendered spans breaks Monaco's wrapping
+        // calculations. So we ONLY change font-family on rendered text
+        // (not font-size) to keep character widths as close as possible
+        // to what Monaco expects. The hidden input layers get the full
+        // font + size override for correct text-input handling.
         css += '.copilot-rtl-v2 .view-lines { unicode-bidi: plaintext !important; }';
         css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
         css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
-        // Apply font to Monaco's render spans for visual display.
-        // Word-wrap metrics are corrected via updateOptions() in tryApplyMonacoFont.
-        css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
-        css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+        // Only change font-family on rendered spans (keep Monaco's default size for correct wrapping)
+        css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
+        css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
+        
         // Protect Monaco code views inside AI response containers from inheriting RTL.
         // The .copilot-rtl-response container sets direction:rtl on the whole block,
         // but embedded Monaco editors (code blocks in responses) must always stay LTR.
@@ -485,11 +491,24 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     // We apply to ALL non-code editors so we don't need fragile DOM matching.
     var _monacoOriginals = new WeakMap();
 
+    // Track which editors already had a layout() pass scheduled
+    // so we don't queue redundant layout() calls per frame.
+    var _layoutScheduled = new WeakSet();
+
+    var _cachedMonacoLib = null;
+    var _asyncDiscoveryStarted = false;
+
     function getMonacoLib() {
+        if (_cachedMonacoLib) return _cachedMonacoLib;
+        // Method 1: global monaco
         try {
-            if (typeof monaco !== 'undefined' && monaco && monaco.editor) return monaco;
+            if (typeof monaco !== 'undefined' && monaco && monaco.editor) {
+                _cachedMonacoLib = monaco;
+                console.log('[RTL-DEBUG] getMonacoLib => FOUND via global monaco');
+                return monaco;
+            }
         } catch(e) {}
-        // Walk requirejs module cache — most reliable in VS Code workbench
+        // Method 2: AMD requirejs module cache (walk defined modules)
         try {
             var ctx = window.require
                 && window.require.s
@@ -500,14 +519,54 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                 var keys = Object.keys(defined);
                 for (var ki = 0; ki < keys.length; ki++) {
                     var mod = defined[keys[ki]];
-                    if (mod && mod.editor && typeof mod.editor.getEditors === 'function') return mod;
+                    if (mod && mod.editor && typeof mod.editor.getEditors === 'function') {
+                        _cachedMonacoLib = mod;
+                        console.log('[RTL-DEBUG] getMonacoLib => FOUND via AMD cache key: ' + keys[ki]);
+                        return mod;
+                    }
                 }
             }
         } catch(e) {}
+        // Method 3: sync require (only works if module already loaded)
         try {
             var req = (typeof require !== 'undefined' ? require : null) || window.require;
-            if (req) { var m = req('vs/editor/editor.main'); if (m && m.editor) return m; }
+            if (req) {
+                var m = req('vs/editor/editor.main');
+                if (m && m.editor) {
+                    _cachedMonacoLib = m;
+                    console.log('[RTL-DEBUG] getMonacoLib => FOUND via sync require');
+                    return m;
+                }
+            }
         } catch(e) {}
+        // Method 4: async require with callback — VS Code's AMD loader
+        // will resolve the module once VS Code finishes loading.
+        // This is a one-time setup; when the callback fires, we cache
+        // the lib and immediately re-process all Monaco editors.
+        if (!_asyncDiscoveryStarted) {
+            _asyncDiscoveryStarted = true;
+            console.log('[RTL-DEBUG] getMonacoLib => sync methods failed, trying async require...');
+            try {
+                var asyncReq = (typeof require !== 'undefined' ? require : null) || window.require;
+                if (asyncReq && typeof asyncReq === 'function') {
+                    asyncReq(['vs/editor/editor.main'], function(m) {
+                        if (m && m.editor && typeof m.editor.getEditors === 'function') {
+                            _cachedMonacoLib = m;
+                            var edCount = 0;
+                            try { edCount = m.editor.getEditors().length; } catch(e){}
+                            var hasRemeasure = typeof m.editor.remeasureFonts === 'function';
+                            console.log('[RTL-DEBUG] ASYNC require => Monaco FOUND! editors=' + edCount + ', remeasureFonts=' + hasRemeasure);
+                            // Re-process all editors now that we have the API
+                            processNonCodeMonacos();
+                        }
+                    }, function(err) {
+                        console.warn('[RTL-DEBUG] ASYNC require failed:', err);
+                    });
+                }
+            } catch(e) {
+                console.warn('[RTL-DEBUG] async require threw:', e);
+            }
+        }
         return null;
     }
 
@@ -522,31 +581,104 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     }
 
     function applyMonacoFontFor(editorInstance) {
-        if (!editorInstance) return;
+        if (!editorInstance) {
+            console.warn('[RTL-DEBUG] applyMonacoFontFor => called with NULL instance, skipping');
+            return;
+        }
         try {
             var fs = parseFloat(RTL_FONT_SIZE);
             var lh = parseFloat(RTL_LINE_HEIGHT);
-            if (!(fs > 0) || !(lh > 0)) return;
+            if (!(fs > 0) || !(lh > 0)) {
+                console.warn('[RTL-DEBUG] applyMonacoFontFor => bad fontSize/lineHeight: fs=' + fs + ', lh=' + lh);
+                return;
+            }
 
             if (!_monacoOriginals.has(editorInstance)) {
                 var raw = editorInstance.getRawOptions ? editorInstance.getRawOptions() : {};
+                console.log('[RTL-DEBUG] applyMonacoFontFor => SAVING originals:', JSON.stringify({
+                    fontSize: raw.fontSize, fontFamily: raw.fontFamily,
+                    lineHeight: raw.lineHeight, wordWrap: raw.wordWrap,
+                    wrappingStrategy: raw.wrappingStrategy
+                }));
                 _monacoOriginals.set(editorInstance, {
                     fontSize: raw.fontSize,
                     fontFamily: raw.fontFamily,
                     lineHeight: raw.lineHeight,
+                    wordWrap: raw.wordWrap,
                     wrappingStrategy: raw.wrappingStrategy,
                     allowVariableFonts: raw.allowVariableFonts
                 });
             }
 
-            editorInstance.updateOptions({
+            var newOpts = {
                 fontSize: fs,
                 fontFamily: RTL_FONT_FAMILY,
                 lineHeight: Math.round(fs * lh),
+                wordWrap: 'on',
                 wrappingStrategy: 'advanced',
                 allowVariableFonts: true
-            });
-        } catch(e) {}
+            };
+            console.log('[RTL-DEBUG] applyMonacoFontFor => calling updateOptions:', JSON.stringify(newOpts));
+            editorInstance.updateOptions(newOpts);
+
+            // Verify options were actually applied
+            try {
+                var after = editorInstance.getRawOptions ? editorInstance.getRawOptions() : {};
+                console.log('[RTL-DEBUG] applyMonacoFontFor => AFTER updateOptions getRawOptions:', JSON.stringify({
+                    fontSize: after.fontSize, fontFamily: after.fontFamily,
+                    lineHeight: after.lineHeight, wordWrap: after.wordWrap,
+                    wrappingStrategy: after.wrappingStrategy
+                }));
+            } catch(ve) {}
+
+            if (!_layoutScheduled.has(editorInstance)) {
+                _layoutScheduled.add(editorInstance);
+                var _remeasurePass = 0;
+
+                function doFullRemeasure() {
+                    _remeasurePass++;
+                    try {
+                        var lib = getMonacoLib();
+                        var didRemeasure = false;
+                        if (lib && lib.editor && lib.editor.remeasureFonts) {
+                            lib.editor.remeasureFonts();
+                            didRemeasure = true;
+                        }
+                        editorInstance.layout();
+                        var didRender = false;
+                        if (editorInstance.render) {
+                            editorInstance.render(true, true);
+                            didRender = true;
+                        }
+                        console.log('[RTL-DEBUG] doFullRemeasure pass #' + _remeasurePass + ' => remeasureFonts=' + didRemeasure + ', layout=true, render=' + didRender);
+                    } catch (e) {
+                        console.error('[RTL-DEBUG] doFullRemeasure pass #' + _remeasurePass + ' ERROR:', e);
+                    }
+                }
+
+                function scheduleRemeasure() {
+                    _layoutScheduled.delete(editorInstance);
+                    console.log('[RTL-DEBUG] scheduleRemeasure => starting 3 passes');
+                    doFullRemeasure();
+                    setTimeout(doFullRemeasure, 150);
+                    setTimeout(doFullRemeasure, 500);
+                }
+
+                if (document.fonts && document.fonts.ready) {
+                    console.log('[RTL-DEBUG] waiting for document.fonts.ready...');
+                    document.fonts.ready.then(function () {
+                        var fontAvailable = false;
+                        try { fontAvailable = document.fonts.check('16px ' + RTL_FONT_NAME); } catch(e){}
+                        console.log('[RTL-DEBUG] document.fonts.ready resolved, font "' + RTL_FONT_NAME + '" available=' + fontAvailable);
+                        requestAnimationFrame(scheduleRemeasure);
+                    });
+                } else {
+                    requestAnimationFrame(scheduleRemeasure);
+                }
+            }
+        } catch(e) {
+            console.error('[RTL-DEBUG] applyMonacoFontFor => EXCEPTION:', e);
+        }
     }
 
     function restoreMonacoFontFor(editorInstance) {
@@ -582,18 +714,27 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         return null;
     }
 
+    var _processLogCount = 0;
     function processNonCodeMonacos() {
+        var shouldLog = (_processLogCount < 10);
+        _processLogCount++;
         var editorRecords = [];
         var lib = getMonacoLib();
         if (lib) {
             try {
                 var monacoEditors = lib.editor.getEditors();
+                var totalEditors = monacoEditors.length;
                 for (var i = 0; i < monacoEditors.length; i++) {
                     var dn = getEditorDomNode(monacoEditors[i]);
                     if (!dn || isMainCodeEditor(dn)) continue;
                     editorRecords.push({ instance: monacoEditors[i], domNode: dn });
                 }
-            } catch(e) {}
+                if (shouldLog) console.log('[RTL-DEBUG] processNonCodeMonacos => lib OK, total=' + totalEditors + ', nonCode=' + editorRecords.length);
+            } catch(e) {
+                if (shouldLog) console.error('[RTL-DEBUG] processNonCodeMonacos => getEditors() error:', e);
+            }
+        } else {
+            if (shouldLog) console.warn('[RTL-DEBUG] processNonCodeMonacos => lib is NULL (waiting for async discovery)');
         }
 
         var allMonacos = document.querySelectorAll('.monaco-editor');
@@ -601,21 +742,23 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             var editor = allMonacos[m];
             if (isMainCodeEditor(editor)) continue;
 
+            // Find editor instance via lib (the only reliable method)
             var editorInstance = findMonacoInstanceForDom(editor, editorRecords);
 
-            // Read ONLY from .view-lines so we don't pick up placeholder text,
-            // aria labels, decorations, or surrounding DOM that isn't the typed text.
+            // Read ONLY from .view-lines so we don't pick up placeholder text
             var viewLines = editor.querySelector('.view-lines');
             var text = viewLines ? (viewLines.textContent || '') : (editor.textContent || '');
 
             // Empty guard: only keep the class if we're mid-render (typing).
-            // On a periodic scan, focusin, or thread switch (not typing), an
-            // empty input correctly removes the class so new conversations start LTR.
             if (!text.trim() && editor.classList.contains('copilot-rtl-v2') && _monacoTyping) {
                 continue;
             }
 
             var arabic = isArabicOrMixed(text);
+
+            if (shouldLog && arabic) {
+                console.log('[RTL-DEBUG]   editor[' + m + '] => instance=' + (editorInstance ? 'FOUND' : 'NULL') + ', arabic=true, text=' + JSON.stringify(text.substring(0, 60)));
+            }
 
             if (arabic) {
                 editor.classList.add('copilot-rtl-v2');
@@ -829,7 +972,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         }
     }
 
-    // ── CSS injection for response containers + Lexical input ──────────
+    // ── CSS injection for response containers + Lexical input + Monaco ──
     function injectAgentStyles() {
         if (document.getElementById('copilot-rtl-agent-styles')) return;
         var style = document.createElement('style');
@@ -854,12 +997,21 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
         // .copilot-rtl-response is now a streaming marker only.
-        // Bot response paragraphs and list items are already styled via the
-        // always-active plaintext rules above, reducing flicker on lists.
         css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
+
+        // ──────── Monaco chat input RTL ──────────────────────────────────
+        css += '.copilot-rtl-v2 .view-lines { unicode-bidi: plaintext !important; }';
+        css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
+        css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+        css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+        // Protect Monaco editors inside response containers from inheriting RTL
+        css += '.leading-relaxed.select-text .monaco-editor, .leading-relaxed.select-text .monaco-editor .view-line, .leading-relaxed.select-text .monaco-editor .view-lines { direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; }';
+        css += '.copilot-rtl-response .monaco-editor, .copilot-rtl-response .monaco-editor .view-line, .copilot-rtl-response .monaco-editor .view-lines { direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; }';
 
         // Lexical input
         css += '[data-lexical-editor="true"].copilot-rtl-lexical { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
@@ -869,6 +1021,207 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         document.head.appendChild(style);
     }
     injectAgentStyles();
+
+    // ── Monaco-based chat input RTL support ──────────────────────────────
+    var CODE_EDITOR_ANCESTORS = [
+        '.editor-group-container',
+        '.editor-instance',
+        '.monaco-workbench .part.editor',
+    ];
+
+    function isMainCodeEditor(monacoEl) {
+        if (!monacoEl || !monacoEl.closest) { return false; }
+        for (var i = 0; i < CODE_EDITOR_ANCESTORS.length; i++) {
+            if (monacoEl.closest(CODE_EDITOR_ANCESTORS[i])) return true;
+        }
+        return false;
+    }
+
+    var _monacoOriginals = new WeakMap();
+    var _layoutScheduled = new WeakSet();
+
+    var _cachedMonacoLib = null;
+    var _asyncDiscoveryStarted = false;
+
+    function getMonacoLib() {
+        if (_cachedMonacoLib) return _cachedMonacoLib;
+        try {
+            if (typeof monaco !== 'undefined' && monaco && monaco.editor) {
+                _cachedMonacoLib = monaco; return monaco;
+            }
+        } catch(e) {}
+        try {
+            var ctx = window.require
+                && window.require.s
+                && window.require.s.contexts
+                && window.require.s.contexts._;
+            var defined = ctx && ctx.defined;
+            if (defined) {
+                var keys = Object.keys(defined);
+                for (var ki = 0; ki < keys.length; ki++) {
+                    var mod = defined[keys[ki]];
+                    if (mod && mod.editor && typeof mod.editor.getEditors === 'function') {
+                        _cachedMonacoLib = mod; return mod;
+                    }
+                }
+            }
+        } catch(e) {}
+        try {
+            var req = (typeof require !== 'undefined' ? require : null) || window.require;
+            if (req) { var m = req('vs/editor/editor.main'); if (m && m.editor) { _cachedMonacoLib = m; return m; } }
+        } catch(e) {}
+        if (!_asyncDiscoveryStarted) {
+            _asyncDiscoveryStarted = true;
+            try {
+                var asyncReq = (typeof require !== 'undefined' ? require : null) || window.require;
+                if (asyncReq && typeof asyncReq === 'function') {
+                    asyncReq(['vs/editor/editor.main'], function(m) {
+                        if (m && m.editor && typeof m.editor.getEditors === 'function') {
+                            _cachedMonacoLib = m;
+                            processNonCodeMonacos();
+                        }
+                    }, function(err) {});
+                }
+            } catch(e) {}
+        }
+        return null;
+    }
+
+    function getEditorDomNode(editorInstance) {
+        try {
+            return editorInstance.getContainerDomNode
+                ? editorInstance.getContainerDomNode()
+                : editorInstance.getDomNode();
+        } catch(e) {
+            return null;
+        }
+    }
+
+    function applyMonacoFontFor(editorInstance) {
+        if (!editorInstance) return;
+        try {
+            var fs = parseFloat(RTL_FONT_SIZE);
+            var lh = parseFloat(RTL_LINE_HEIGHT);
+            if (!(fs > 0) || !(lh > 0)) return;
+
+            if (!_monacoOriginals.has(editorInstance)) {
+                var raw = editorInstance.getRawOptions ? editorInstance.getRawOptions() : {};
+                _monacoOriginals.set(editorInstance, {
+                    fontSize: raw.fontSize,
+                    fontFamily: raw.fontFamily,
+                    lineHeight: raw.lineHeight,
+                    wordWrap: raw.wordWrap,
+                    wrappingStrategy: raw.wrappingStrategy,
+                    allowVariableFonts: raw.allowVariableFonts
+                });
+            }
+
+            var newOpts = {
+                fontSize: fs,
+                fontFamily: RTL_FONT_FAMILY,
+                lineHeight: Math.round(fs * lh),
+                wordWrap: 'on',
+                wrappingStrategy: 'advanced',
+                allowVariableFonts: true
+            };
+            editorInstance.updateOptions(newOpts);
+
+            if (!_layoutScheduled.has(editorInstance)) {
+                _layoutScheduled.add(editorInstance);
+
+                function doFullRemeasure() {
+                    try {
+                        var lib = getMonacoLib();
+                        if (lib && lib.editor && lib.editor.remeasureFonts) {
+                            lib.editor.remeasureFonts();
+                        }
+                        editorInstance.layout();
+                        if (editorInstance.render) {
+                            editorInstance.render(true, true);
+                        }
+                    } catch (e) {}
+                }
+
+                function scheduleRemeasure() {
+                    _layoutScheduled.delete(editorInstance);
+                    doFullRemeasure();
+                    setTimeout(doFullRemeasure, 150);
+                    setTimeout(doFullRemeasure, 500);
+                }
+
+                if (document.fonts && document.fonts.ready) {
+                    document.fonts.ready.then(function () {
+                        requestAnimationFrame(scheduleRemeasure);
+                    });
+                } else {
+                    requestAnimationFrame(scheduleRemeasure);
+                }
+            }
+        } catch(e) {}
+    }
+
+    function restoreMonacoFontFor(editorInstance) {
+        if (!editorInstance) return;
+        try {
+            if (_monacoOriginals.has(editorInstance)) {
+                editorInstance.updateOptions(_monacoOriginals.get(editorInstance));
+                _monacoOriginals.delete(editorInstance);
+            }
+        } catch(e) {}
+    }
+
+    function findMonacoInstanceForDom(monacoDom, editorRecords) {
+        for (var i = 0; i < editorRecords.length; i++) {
+            var rec = editorRecords[i];
+            if (!rec.domNode) continue;
+            if (rec.domNode === monacoDom) return rec.instance;
+            if (rec.domNode.contains(monacoDom) || monacoDom.contains(rec.domNode)) return rec.instance;
+        }
+        return null;
+    }
+
+    // True while we are inside a double-rAF triggered by an 'input' event.
+    var _monacoTyping = false;
+
+    function processNonCodeMonacos() {
+        var editorRecords = [];
+        var lib = getMonacoLib();
+        if (lib) {
+            try {
+                var monacoEditors = lib.editor.getEditors();
+                for (var i = 0; i < monacoEditors.length; i++) {
+                    var dn = getEditorDomNode(monacoEditors[i]);
+                    if (!dn || isMainCodeEditor(dn)) continue;
+                    editorRecords.push({ instance: monacoEditors[i], domNode: dn });
+                }
+            } catch(e) {}
+        }
+
+        var allMonacos = document.querySelectorAll('.monaco-editor');
+        for (var m = 0; m < allMonacos.length; m++) {
+            var editor = allMonacos[m];
+            if (isMainCodeEditor(editor)) continue;
+
+            var editorInstance = findMonacoInstanceForDom(editor, editorRecords);
+
+            var viewLines = editor.querySelector('.view-lines');
+            var text = viewLines ? (viewLines.textContent || '') : (editor.textContent || '');
+
+            if (!text.trim() && editor.classList.contains('copilot-rtl-v2') && _monacoTyping) {
+                continue;
+            }
+
+            var arabic = isArabic(text);
+
+            if (arabic) {
+                editor.classList.add('copilot-rtl-v2');
+                applyMonacoFontFor(editorInstance);
+            } else {
+                editor.classList.remove('copilot-rtl-v2');
+                restoreMonacoFontFor(editorInstance);
+            }
+        }
+    }
 
     // ── Input box (Lexical contenteditable) ──────────────────────────────
     // Called ONLY from user input events — never from the MutationObserver —
@@ -935,6 +1288,7 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         _scanTimeout = setTimeout(function () {
             _scanTimeout = null;
             processMessages();
+            processNonCodeMonacos();
         }, 150);
         // Each mutation means streaming is still active; schedule stabilize
         scheduleStabilize();
@@ -948,16 +1302,42 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
             childList: true,
             subtree: true
         });
-        // Only scan responses here; input is handled by 'input' events
         processMessages();
+        processNonCodeMonacos();
     }
 
-    // Also watch input changes directly
+    // Watch input changes directly
     function watchInputEvents() {
         document.addEventListener('input', function (e) {
             var target = e.target;
-            if (target && target.closest && target.closest('[data-lexical-editor="true"]')) {
+            if (!target || !target.closest) return;
+
+            // Lexical input
+            if (target.closest('[data-lexical-editor="true"]')) {
                 processInput();
+            }
+
+            // Monaco input — double rAF so Monaco finishes updating .view-line elements
+            var monacoParent = target.closest('.monaco-editor');
+            if (monacoParent && !isMainCodeEditor(monacoParent)) {
+                _monacoTyping = true;
+                requestAnimationFrame(function () {
+                    requestAnimationFrame(function () {
+                        _monacoTyping = false;
+                        processNonCodeMonacos();
+                    });
+                });
+            }
+        }, true);
+
+        // Also scan when the user focuses any Monaco chat input.
+        // _monacoTyping is false here so an empty input correctly removes copilot-rtl-v2.
+        document.addEventListener('focusin', function (e) {
+            var target = e.target;
+            if (!target || !target.closest) return;
+            var monacoParent = target.closest('.monaco-editor');
+            if (monacoParent && !isMainCodeEditor(monacoParent)) {
+                processNonCodeMonacos();
             }
         }, true);
     }
@@ -972,17 +1352,18 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         watchInputEvents();
     }
 
-    // Periodic fallback for lazy-loaded content
-    // processInput() is included here (not in the observer) to pick up initial state.
-    var _count = 0;
-    var _timer = setInterval(function () {
+    // Periodic fallback — runs indefinitely so Monaco inputs are always
+    // in sync regardless of when the agent panel is opened or switched.
+    // (The main workbench script uses the same pattern.)
+    setInterval(function () {
         processMessages();
         processInput();
-        if (++_count >= 20) { clearInterval(_timer); }
+        processNonCodeMonacos();
     }, 3000);
 
-    // Initial input detection on load
+    // Initial detection on load
     processInput();
+    processNonCodeMonacos();
 
 }());
 `;
