@@ -4,7 +4,9 @@
 
 ### Fixed
 - Word-wrap calculation in the agent chat input (Antigravity chat panel) now correctly aligns with the visual font size — removed redundant `font-size` CSS overrides on Monaco spans that were creating a double-scaling "zoom" effect
-- English text in the Monaco chat input no longer forced to RTL — changed `.view-line` from `direction: rtl` to `unicode-bidi: plaintext` so each line auto-detects its direction from the first strong character (Arabic → RTL, English → LTR), matching the streaming chat behavior
+
+### Known Limitation
+- Monaco editor does not support per-line RTL direction — when Arabic text is present in the chat input, all lines are RTL; when only English text is present, all lines are LTR. This is a fundamental Monaco limitation (no native RTL support in its cursor positioning engine).
 
 ## [0.1.8] - 2026-04-09
 
