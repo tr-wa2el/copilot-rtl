@@ -756,9 +756,65 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             if (arabic) {
                 editor.classList.add('copilot-rtl-v2');
                 applyMonacoFontFor(editorInstance);
+                attachLineObserver(editor);
             } else {
                 editor.classList.remove('copilot-rtl-v2');
                 restoreMonacoFontFor(editorInstance);
+                detachLineObserver(editor);
+            }
+        }
+    }
+
+    // ── Per-line direction via MutationObserver (fires before paint) ─────
+    // CSS sets direction:rtl on all .view-line as default (Arabic, no flicker).
+    // This observer corrects English-only lines to LTR before the browser
+    // paints, so there is zero visible flicker for either language.
+    var _lineObservers = new WeakMap();
+
+    function applyLineDirections(viewLinesEl) {
+        var lines = viewLinesEl.children;
+        for (var i = 0; i < lines.length; i++) {
+            if (!lines[i].classList || !lines[i].classList.contains('view-line')) continue;
+            var lineText = lines[i].textContent || '';
+            if (!isArabicOrMixed(lineText)) {
+                lines[i].style.setProperty('direction', 'ltr', 'important');
+                lines[i].style.setProperty('text-align', 'left', 'important');
+            } else {
+                // Remove inline overrides so CSS direction:rtl takes effect
+                lines[i].style.removeProperty('direction');
+                lines[i].style.removeProperty('text-align');
+            }
+        }
+    }
+
+    function attachLineObserver(editorEl) {
+        if (_lineObservers.has(editorEl)) return;
+        var viewLinesEl = editorEl.querySelector('.view-lines');
+        if (!viewLinesEl) return;
+
+        // Initial pass on existing lines
+        applyLineDirections(viewLinesEl);
+
+        var obs = new MutationObserver(function() {
+            applyLineDirections(viewLinesEl);
+        });
+        obs.observe(viewLinesEl, { childList: true, subtree: true });
+        _lineObservers.set(editorEl, obs);
+    }
+
+    function detachLineObserver(editorEl) {
+        var obs = _lineObservers.get(editorEl);
+        if (obs) {
+            obs.disconnect();
+            _lineObservers.delete(editorEl);
+        }
+        // Clear any inline direction overrides
+        var viewLinesEl = editorEl.querySelector('.view-lines');
+        if (viewLinesEl) {
+            var lines = viewLinesEl.querySelectorAll('.view-line');
+            for (var i = 0; i < lines.length; i++) {
+                lines[i].style.removeProperty('direction');
+                lines[i].style.removeProperty('text-align');
             }
         }
     }
@@ -1209,9 +1265,57 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
             if (arabic) {
                 editor.classList.add('copilot-rtl-v2');
                 applyMonacoFontFor(editorInstance);
+                attachLineObserver(editor);
             } else {
                 editor.classList.remove('copilot-rtl-v2');
                 restoreMonacoFontFor(editorInstance);
+                detachLineObserver(editor);
+            }
+        }
+    }
+
+    // ── Per-line direction via MutationObserver (fires before paint) ─────
+    var _lineObservers = new WeakMap();
+
+    function applyLineDirections(viewLinesEl) {
+        var lines = viewLinesEl.children;
+        for (var i = 0; i < lines.length; i++) {
+            if (!lines[i].classList || !lines[i].classList.contains('view-line')) continue;
+            var lineText = lines[i].textContent || '';
+            if (!isArabic(lineText)) {
+                lines[i].style.setProperty('direction', 'ltr', 'important');
+                lines[i].style.setProperty('text-align', 'left', 'important');
+            } else {
+                lines[i].style.removeProperty('direction');
+                lines[i].style.removeProperty('text-align');
+            }
+        }
+    }
+
+    function attachLineObserver(editorEl) {
+        if (_lineObservers.has(editorEl)) return;
+        var viewLinesEl = editorEl.querySelector('.view-lines');
+        if (!viewLinesEl) return;
+        applyLineDirections(viewLinesEl);
+        var obs = new MutationObserver(function() {
+            applyLineDirections(viewLinesEl);
+        });
+        obs.observe(viewLinesEl, { childList: true, subtree: true });
+        _lineObservers.set(editorEl, obs);
+    }
+
+    function detachLineObserver(editorEl) {
+        var obs = _lineObservers.get(editorEl);
+        if (obs) {
+            obs.disconnect();
+            _lineObservers.delete(editorEl);
+        }
+        var viewLinesEl = editorEl.querySelector('.view-lines');
+        if (viewLinesEl) {
+            var lines = viewLinesEl.querySelectorAll('.view-line');
+            for (var i = 0; i < lines.length; i++) {
+                lines[i].style.removeProperty('direction');
+                lines[i].style.removeProperty('text-align');
             }
         }
     }
