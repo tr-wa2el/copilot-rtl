@@ -414,6 +414,10 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
         css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '.copilot-rtl-v2.ghost-cursor-attached .cursor { visibility: hidden !important; }';
+        css += '#copilot-rtl-ghost-cursor { position: fixed; width: 2px; background-color: var(--vscode-editorCursor-foreground, #007acc); pointer-events: none; z-index: 100000; transition: top 0.05s, left 0.05s; display: none; }';
+        css += '@keyframes copilot-rtl-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }';
+        css += '#copilot-rtl-ghost-cursor.blink { animation: copilot-rtl-blink 1s step-end infinite; }';
         css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
         css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
         
@@ -697,6 +701,187 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         } catch(e) {}
     }
 
+    // ── Ghost Cursor Logic ────────────────────────────────────────────────
+    var _ghostCursor = null;
+    var _cursorListeners = new WeakMap();
+
+    function getOrCreateGhostCursor() {
+        if (!_ghostCursor) {
+            _ghostCursor = document.getElementById('copilot-rtl-ghost-cursor');
+            if (!_ghostCursor) {
+                _ghostCursor = document.createElement('div');
+                _ghostCursor.id = 'copilot-rtl-ghost-cursor';
+                _ghostCursor.className = 'blink';
+                document.body.appendChild(_ghostCursor);
+                _ghostCursor.style.display = 'none';
+            }
+        }
+        return _ghostCursor;
+    }
+
+    function hideGhostCursor() {
+        if (_ghostCursor) _ghostCursor.style.display = 'none';
+    }
+
+    function getCaretCoordinatesFromTextNode(container, targetTextOffset) {
+        var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+        var node;
+        var currentOffset = 0;
+        var range = document.createRange();
+        
+        while ((node = walker.nextNode())) {
+            var len = node.nodeValue.length;
+            if (currentOffset + len >= targetTextOffset) {
+                var offsetInNode = Math.max(0, Math.min(targetTextOffset - currentOffset, len));
+                range.setStart(node, offsetInNode);
+                range.setEnd(node, offsetInNode);
+                return range.getBoundingClientRect();
+            }
+            currentOffset += len;
+        }
+        
+        // Fallback to the end of the last text node
+        var w2 = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+        var lastNode = null;
+        while ((node = w2.nextNode())) { lastNode = node; }
+        if (lastNode) {
+            range.setStart(lastNode, lastNode.nodeValue.length);
+            range.setEnd(lastNode, lastNode.nodeValue.length);
+            return range.getBoundingClientRect();
+        }
+        return null;
+    }
+
+    function findOffsetFromMonacoLeft(realLineElement, monacoLeft) {
+        var walker = document.createTreeWalker(realLineElement, NodeFilter.SHOW_TEXT, null, false);
+        var totalLength = 0;
+        while (walker.nextNode()) {
+            totalLength += walker.currentNode.nodeValue.length;
+        }
+        if (totalLength === 0) return 0;
+
+        var clone = realLineElement.cloneNode(true);
+        clone.style.cssText = 'direction: ltr !important; text-align: left !important; position: absolute; visibility: hidden; top: 0; left: 0; width: 1000px; white-space: pre;';
+        clone.classList.remove('copilot-rtl-v2');
+        realLineElement.parentNode.appendChild(clone);
+        
+        var cloneRect = clone.getBoundingClientRect();
+        var bestOffset = 0;
+        var minDiff = Infinity;
+
+        var cloneWalker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT, null, false);
+        var cNode;
+        var currentOffset = 0;
+        var range = document.createRange();
+
+        while ((cNode = cloneWalker.nextNode())) {
+            var len = cNode.nodeValue.length;
+            for (var i = 0; i <= len; i++) {
+                try {
+                    range.setStart(cNode, i);
+                    range.setEnd(cNode, i);
+                    var r = range.getBoundingClientRect();
+                    var relativeLeft = r.left - cloneRect.left;
+                    var diff = Math.abs(relativeLeft - monacoLeft);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        bestOffset = currentOffset + i;
+                    }
+                } catch(e) {}
+            }
+            currentOffset += len;
+        }
+
+        clone.parentNode.removeChild(clone);
+        return bestOffset;
+    }
+
+    function updateGhostCursorFromDOM(cursorElement) {
+        var monacoEditor = cursorElement.closest('.monaco-editor');
+        if (!monacoEditor || !monacoEditor.classList.contains('copilot-rtl-v2')) {
+            return hideGhostCursor();
+        }
+
+        var linesContent = monacoEditor.querySelector('.lines-content');
+        if (!linesContent) return hideGhostCursor();
+
+        var topStr = cursorElement.style.top;
+        var leftStr = cursorElement.style.left;
+        if (!topStr || !leftStr) return;
+
+        var monacoTop = parseFloat(topStr);
+        var monacoLeft = parseFloat(leftStr);
+
+        var viewLines = linesContent.querySelectorAll('.view-line');
+        var targetLineElement = null;
+        for (var i = 0; i < viewLines.length; i++) {
+            if (Math.abs(parseFloat(viewLines[i].style.top || '0') - monacoTop) < 2) {
+                targetLineElement = viewLines[i];
+                break;
+            }
+        }
+
+        if (targetLineElement) {
+            var targetOffset = findOffsetFromMonacoLeft(targetLineElement, monacoLeft);
+            var rect = getCaretCoordinatesFromTextNode(targetLineElement, targetOffset);
+
+            if (rect) {
+                var gc = getOrCreateGhostCursor();
+                gc.style.display = 'block';
+                gc.style.left = rect.left + 'px';
+                gc.style.top = rect.top + 'px';
+                gc.style.height = (rect.height || parseFloat(RTL_FONT_SIZE) * parseFloat(RTL_LINE_HEIGHT) || 20) + 'px';
+                
+                gc.classList.remove('blink');
+                void gc.offsetWidth;
+                gc.classList.add('blink');
+                
+                if (!monacoEditor.classList.contains('ghost-cursor-attached')) {
+                    monacoEditor.classList.add('ghost-cursor-attached');
+                }
+                return;
+            }
+        }
+        hideGhostCursor();
+    }
+
+    var _cursorObserver = null;
+    var _observedCursorLayers = new WeakSet();
+
+    function observeCursorLayers() {
+        if (!_cursorObserver) {
+            _cursorObserver = new MutationObserver(function(mutations) {
+                mutations.forEach(function(m) {
+                    var target = m.target;
+                    if (target.classList.contains('cursor')) {
+                        if (target.style.display === 'none') {
+                            hideGhostCursor();
+                        } else {
+                            updateGhostCursorFromDOM(target);
+                        }
+                    } else if (target.classList.contains('cursors-layer')) {
+                        var cursors = target.querySelectorAll('.cursor');
+                        if (cursors.length === 0) hideGhostCursor();
+                        else updateGhostCursorFromDOM(cursors[0]);
+                    }
+                });
+            });
+        }
+
+        var layers = document.querySelectorAll('.cursors-layer');
+        for (var i = 0; i < layers.length; i++) {
+            if (!_observedCursorLayers.has(layers[i])) {
+                _observedCursorLayers.add(layers[i]);
+                _cursorObserver.observe(layers[i], {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ['style']
+                });
+            }
+        }
+    }
+
     function findMonacoInstanceForDom(monacoDom, editorRecords) {
         for (var i = 0; i < editorRecords.length; i++) {
             var rec = editorRecords[i];
@@ -721,6 +906,8 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                     var dn = getEditorDomNode(monacoEditors[i]);
                     if (!dn || isMainCodeEditor(dn)) continue;
                     editorRecords.push({ instance: monacoEditors[i], domNode: dn });
+                    
+                    attachGhostCursorListener(monacoEditors[i]);
                 }
                 if (shouldLog) console.log('[RTL-DEBUG] processNonCodeMonacos => lib OK, total=' + totalEditors + ', nonCode=' + editorRecords.length);
             } catch(e) {
@@ -818,6 +1005,8 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         if (_mainInterval) { clearInterval(_mainInterval); _mainInterval = null; }
         var style = document.getElementById('copilot-rtl-styles');
         if (style && style.parentNode) { style.parentNode.removeChild(style); }
+        var gc = document.getElementById('copilot-rtl-ghost-cursor');
+        if (gc && gc.parentNode) { gc.parentNode.removeChild(gc); _ghostCursor = null; }
         document.querySelectorAll('.copilot-rtl-response').forEach(function(el) { el.classList.remove('copilot-rtl-response'); });
         document.querySelectorAll('.copilot-rtl-v2').forEach(function(el) { el.classList.remove('copilot-rtl-v2'); });
         document.querySelectorAll('.copilot-rtl-lexical').forEach(function(el) { el.classList.remove('copilot-rtl-lexical'); });
@@ -1000,6 +1189,10 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
         css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        css += '.copilot-rtl-v2.ghost-cursor-attached .cursor { visibility: hidden !important; }';
+        css += '#copilot-rtl-ghost-cursor { position: fixed; width: 2px; background-color: var(--vscode-editorCursor-foreground, #007acc); pointer-events: none; z-index: 100000; transition: top 0.05s, left 0.05s; display: none; }';
+        css += '@keyframes copilot-rtl-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }';
+        css += '#copilot-rtl-ghost-cursor.blink { animation: copilot-rtl-blink 1s step-end infinite; }';
         css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
         css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
         // Protect Monaco editors inside response containers from inheriting RTL
@@ -1163,6 +1356,151 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         } catch(e) {}
     }
 
+    // ── Ghost Cursor Logic ────────────────────────────────────────────────
+    var _ghostCursor = null;
+    var _cursorListeners = new WeakMap();
+
+    function getOrCreateGhostCursor() {
+        if (!_ghostCursor) {
+            _ghostCursor = document.getElementById('copilot-rtl-ghost-cursor');
+            if (!_ghostCursor) {
+                _ghostCursor = document.createElement('div');
+                _ghostCursor.id = 'copilot-rtl-ghost-cursor';
+                _ghostCursor.className = 'blink';
+                document.body.appendChild(_ghostCursor);
+                _ghostCursor.style.display = 'none';
+            }
+        }
+        return _ghostCursor;
+    }
+
+    function hideGhostCursor() {
+        if (_ghostCursor) _ghostCursor.style.display = 'none';
+    }
+
+    function getCaretCoordinatesFromTextNode(container, targetTextOffset) {
+        var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+        var node;
+        var currentOffset = 0;
+        var range = document.createRange();
+        
+        while ((node = walker.nextNode())) {
+            var len = node.nodeValue.length;
+            if (currentOffset + len >= targetTextOffset) {
+                var offsetInNode = Math.max(0, Math.min(targetTextOffset - currentOffset, len));
+                range.setStart(node, offsetInNode);
+                range.setEnd(node, offsetInNode);
+                return range.getBoundingClientRect();
+            }
+            currentOffset += len;
+        }
+        
+        // Fallback to the end of the last text node
+        var w2 = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+        var lastNode = null;
+        while ((node = w2.nextNode())) { lastNode = node; }
+        if (lastNode) {
+            range.setStart(lastNode, lastNode.nodeValue.length);
+            range.setEnd(lastNode, lastNode.nodeValue.length);
+            return range.getBoundingClientRect();
+        }
+        return null;
+    }
+
+    function updateGhostCursorPosition(editorInstance, position) {
+        var domNode = getEditorDomNode(editorInstance);
+        if (!domNode) return hideGhostCursor();
+        
+        if (!domNode.classList.contains('copilot-rtl-v2')) {
+            return hideGhostCursor();
+        }
+        
+        var gc = getOrCreateGhostCursor();
+        
+        try {
+            var top = editorInstance.getTopForLineNumber(position.lineNumber);
+            var viewLines = domNode.querySelectorAll('.view-line');
+            var targetLineElement = null;
+            
+            for (var i = 0; i < viewLines.length; i++) {
+                var vl = viewLines[i];
+                var vlTop = parseFloat(vl.style.top || '0');
+                if (Math.abs(vlTop - top) < 2) {
+                    targetLineElement = vl;
+                    break;
+                }
+            }
+            
+            if (targetLineElement) {
+                var targetOffset = position.column - 1;
+                var rect = getCaretCoordinatesFromTextNode(targetLineElement, targetOffset);
+                
+                if (rect) {
+                    gc.style.display = 'block';
+                    gc.style.left = rect.left + 'px';
+                    gc.style.top = rect.top + 'px';
+                    gc.style.height = (rect.height || parseFloat(RTL_FONT_SIZE) * parseFloat(RTL_LINE_HEIGHT) || 20) + 'px';
+                    
+                    // Restart blinking animation
+                    gc.classList.remove('blink');
+                    void gc.offsetWidth; // trigger reflow
+                    gc.classList.add('blink');
+                    return;
+                }
+            }
+        } catch (e) {
+            console.error('[RTL-DEBUG] Ghost Cursor error:', e);
+        }
+        
+        hideGhostCursor();
+    }
+
+    function attachGhostCursorListener(editorInstance) {
+        if (!editorInstance) return;
+        if (_cursorListeners.has(editorInstance)) return;
+        
+        try {
+            var disposable = editorInstance.onDidChangeCursorPosition(function(e) {
+                requestAnimationFrame(function() {
+                    requestAnimationFrame(function() {
+                        updateGhostCursorPosition(editorInstance, e.position);
+                    });
+                });
+            });
+            
+            var scrollDisposable = editorInstance.onDidScrollChange(function() {
+                var pos = editorInstance.getPosition();
+                if (pos) {
+                    requestAnimationFrame(function() {
+                        updateGhostCursorPosition(editorInstance, pos);
+                    });
+                }
+            });
+            
+            var focusDisposable = editorInstance.onDidFocusEditorText(function() {
+                 var pos = editorInstance.getPosition();
+                 if (pos) {
+                      requestAnimationFrame(function() {
+                          updateGhostCursorPosition(editorInstance, pos);
+                      });
+                 }
+            });
+            
+            var blurDisposable = editorInstance.onDidBlurEditorText(function() {
+                 hideGhostCursor();
+            });
+
+            _cursorListeners.set(editorInstance, {
+                dispose: function() {
+                    disposable.dispose();
+                    if(scrollDisposable) scrollDisposable.dispose();
+                    if(focusDisposable) focusDisposable.dispose();
+                    if(blurDisposable) blurDisposable.dispose();
+                }
+            });
+        } catch(e) {}
+    }
+
     function findMonacoInstanceForDom(monacoDom, editorRecords) {
         for (var i = 0; i < editorRecords.length; i++) {
             var rec = editorRecords[i];
@@ -1189,6 +1527,8 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
                 }
             } catch(e) {}
         }
+        // Always try to attach DOM-based cursor tracking to visible editors
+        observeCursorLayers();
 
         var allMonacos = document.querySelectorAll('.monaco-editor');
         for (var m = 0; m < allMonacos.length; m++) {
