@@ -410,17 +410,10 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
 
         // ──────── Monaco chat input RTL ──────────────────────────────────
-        // We cannot access Monaco's editor API in modern VS Code (ESM).
-        // Changing font-size on the rendered spans breaks Monaco's wrapping
-        // calculations. So we ONLY change font-family on rendered text
-        // (not font-size) to keep character widths as close as possible
-        // to what Monaco expects. The hidden input layers get the full
-        // font + size override for correct text-input handling.
         css += '.copilot-rtl-v2 .view-lines { unicode-bidi: plaintext !important; }';
         css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
         css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
-        // Only change font-family on rendered spans (keep Monaco's default size for correct wrapping)
         css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
         css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
         
@@ -1007,8 +1000,8 @@ function buildAgentScriptContent(fontFamily: string, fontSize: number, lineHeigh
         css += '.copilot-rtl-v2 .view-line { direction: rtl !important; text-align: right !important; }';
         css += '.copilot-rtl-v2 .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
         css += '.copilot-rtl-v2 .inputarea { direction: rtl !important; text-align: right !important; font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
-        css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
-        css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; font-size: ' + RTL_FONT_SIZE + ' !important; }';
+        css += '.copilot-rtl-v2 [class*="mtk"] { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
+        css += '.copilot-rtl-v2 .view-line span { font-family: ' + RTL_FONT_FAMILY + ' !important; }';
         // Protect Monaco editors inside response containers from inheriting RTL
         css += '.leading-relaxed.select-text .monaco-editor, .leading-relaxed.select-text .monaco-editor .view-line, .leading-relaxed.select-text .monaco-editor .view-lines { direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; }';
         css += '.copilot-rtl-response .monaco-editor, .copilot-rtl-response .monaco-editor .view-line, .copilot-rtl-response .monaco-editor .view-lines { direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; }';
