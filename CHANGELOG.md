@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.9] - 2026-04-18
+
+### Fixed
+- Word-wrap calculation in the agent chat input (Antigravity chat panel) now correctly aligns with the visual font size — removed redundant `font-size` CSS overrides on Monaco spans that were creating a double-scaling "zoom" effect and causing Monaco's internal metrics to mismatch.
+
 ## [0.1.8] - 2026-04-09
 
 ### Added
