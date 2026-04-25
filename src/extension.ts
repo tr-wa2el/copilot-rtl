@@ -9,11 +9,18 @@ const PATCH_JS_NAME = 'copilot-rtl-patch.js';
 const AGENT_PATCH_JS_NAME = 'copilot-rtl-agent-patch.js';
 const STATE_FILE_NAME = 'copilot-rtl-state.json';
 const STATE_KEY_DISABLED = 'copilotRtl.userDisabled';
+const STATE_KEY_PATCHED_VERSION = 'copilotRtl.patchedVersion';
 
 /** The JS that gets written to a standalone file (no inline script — avoids CSP). */
-function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, textAlign: string): string {
+function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight: number, ltrFontFamily: string, ltrFontSize: number, ltrLineHeight: number, textAlign: string, extVersion = '0.2.4'): string {
     return `(function () {
     'use strict';
+
+    // ── Diagnostic: confirm the patch script is actually running ─────────
+    // Check the browser DevTools console for this line to verify the patch
+    // is loaded. If you don't see it, the workbench.html patch is not active.
+    console.log('[Copilot RTL] v${extVersion} patch loaded \u2713');
+    document.documentElement.setAttribute('data-copilot-rtl', ${JSON.stringify(extVersion)});
 
     var _observer = null;
     var _mainInterval = null;
@@ -41,6 +48,22 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
 
     // Arabic Unicode blocks: Arabic, Arabic Supplement, Arabic Presentation Forms A & B
     const ARABIC_RE = /[\\u0600-\\u06FF\\u0750-\\u077F\\uFB50-\\uFDFF\\uFE70-\\uFEFF]/;
+
+    // Suppress KaTeX warnings about Arabic/RTL characters. These warnings are emitted
+    // by VS Code's built-in markdown renderer when Arabic text appears inside math
+    // delimiters ($...$). They are harmless — KaTeX still renders with a fallback glyph —
+    // but produce noisy console output. We match only KaTeX-specific messages that
+    // reference an Arabic Unicode character so other warnings are unaffected.
+    (function () {
+        var _origWarn = console.warn;
+        console.warn = function () {
+            var msg = arguments[0] != null ? String(arguments[0]) : '';
+            if ((msg.indexOf('[unknownSymbol]') !== -1 || msg.indexOf('No character metrics') !== -1) && ARABIC_RE.test(msg)) {
+                return;
+            }
+            return _origWarn.apply(console, arguments);
+        };
+    })();
 
     // All known selectors for the Copilot/chat markdown container across VS Code versions
     const MD_CONTAINER_SELECTORS = [
@@ -102,6 +125,14 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                 block.style.setProperty('font-family', RTL_FONT_FAMILY, 'important');
                 block.style.setProperty('font-size', RTL_FONT_SIZE, 'important');
                 block.style.setProperty('line-height', RTL_LINE_HEIGHT, 'important');
+                // Math (KaTeX) inside Arabic paragraphs must stay LTR — math notation
+                // does not depend on text direction and KaTeX doesn't support RTL.
+                var katexEls = block.querySelectorAll('.katex, .katex-html');
+                for (var k = 0; k < katexEls.length; k++) {
+                    katexEls[k].style.setProperty('direction', 'ltr', 'important');
+                    katexEls[k].style.setProperty('unicode-bidi', 'isolate', 'important');
+                    katexEls[k].style.setProperty('text-align', 'left', 'important');
+                }
             } else {
                 // Force non-Arabic blocks back to LTR so one Arabic line
                 // does not flip the whole list/section direction.
@@ -124,27 +155,19 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
     function processMarkdown(root) {
         var rootArabic = isArabicOrMixed(root.textContent || '');
 
-        // Once Arabic is detected, add the CSS class immediately
+        // Add/remove the CSS class based on current content
         if (rootArabic) {
             root.classList.add('copilot-rtl-response');
-        }
-
-        // If the container already has the RTL class and we're streaming,
-        // skip ALL child processing — this is the main anti-flicker guard.
-        // CSS rules on .copilot-rtl-response handle child styling automatically.
-        if (root.classList.contains('copilot-rtl-response') && _isStreaming) {
-            return;
-        }
-
-        // Non-streaming: apply/remove class based on current content
-        if (!rootArabic) {
+        } else {
             root.classList.remove('copilot-rtl-response');
         }
 
-        // Tables need per-cell treatment for mixed content — but ONLY when not streaming.
-        // During streaming the cells are recreated on every token which causes inline
-        // style thrashing and visible flicker. CSS unicode-bidi:plaintext handles
-        // direction automatically until streaming finishes.
+        // Apply per-block direction styles immediately — do NOT wait for streaming to stop.
+        // The old _isStreaming guard was causing RTL to never apply when VS Code's virtual
+        // list made continuous DOM mutations that kept _isStreaming perpetually true.
+        markMixedTextBlocks(root);
+
+        // Tables need per-cell treatment but are deferred to avoid heavy work during streaming.
         if (!_isStreaming) {
             var cells = root.querySelectorAll('th, td');
             for (var t = 0; t < cells.length; t++) {
@@ -158,7 +181,6 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
                     tables[tb].style.direction = 'ltr';
                 }
             }
-            markMixedTextBlocks(root);
         }
     }
 
@@ -200,24 +222,15 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
             document.querySelectorAll(sel).forEach(function (container) {
                 var containerArabic = isArabicOrMixed(container.textContent || '');
 
-                // Lock the container as soon as Arabic is detected
+                // Add/remove class and immediately apply per-block direction styles.
+                // Do NOT defer to the streaming stabilize timeout — VS Code's virtual
+                // list mutations can keep _isStreaming true indefinitely.
                 if (containerArabic) {
                     container.classList.add('copilot-rtl-response');
-                }
-
-                // If locked and streaming, skip ALL child processing
-                if (container.classList.contains('copilot-rtl-response') && _isStreaming) {
-                    return;
-                }
-
-                // Non-streaming: allow removal
-                if (!containerArabic) {
+                } else {
                     container.classList.remove('copilot-rtl-response');
                 }
-
-                if (!_isStreaming) {
-                    markMixedTextBlocks(container);
-                }
+                markMixedTextBlocks(container);
             });
         });
 
@@ -364,6 +377,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         });
         css += respCssSels.join(', ') + ' { ';
         css += 'unicode-bidi: plaintext !important; ';
+        css += 'text-align: right !important; ';
         css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
         css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
         css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
@@ -382,6 +396,7 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         }).join(', ');
         css += mdSels + ' { ';
         css += 'unicode-bidi: plaintext !important; ';
+        css += 'text-align: right !important; ';
         css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
         css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
         css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
@@ -394,17 +409,29 @@ function buildScriptFileContent(fontFamily: string, fontSize: number, lineHeight
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
         var mdCodeSels = MD_CONTAINER_SELECTORS.map(function(s) {
-            return s + ' pre, ' + s + ' code';
+            return s + ' pre, ' + s + ' code, ' + s + ' .katex, ' + s + ' .katex-html';
         }).join(', ');
         css += mdCodeSels + ' { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
-        css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
+        css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';;
 
-        // .copilot-rtl-response is now used as a streaming marker only.
-        // Per-block plaintext direction rules already handle each paragraph/list
-        // item independently, which reduces flicker during partial streaming.
-        css += '.copilot-rtl-response pre, .copilot-rtl-response code { ';
+        // .copilot-rtl-response: added by JS when the container has Arabic content.
+        // These CSS rules apply RTL direction immediately when the class is present,
+        // even during streaming before markMixedTextBlocks() can run. JS overrides
+        // individual LTR paragraphs back to direction:ltr via inline !important.
+        var rtlChildSels2 = ['p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote']
+            .map(function(t) { return '.copilot-rtl-response ' + t; }).join(', ');
+        css += '.copilot-rtl-response { direction: rtl !important; }';
+        css += rtlChildSels2 + ' { ';
+        css += 'direction: rtl !important; ';
+        css += 'text-align: ' + RTL_TEXT_ALIGN + ' !important; ';
+        css += 'unicode-bidi: embed !important; ';
+        css += 'font-family: ' + RTL_FONT_FAMILY + ' !important; ';
+        css += 'font-size: ' + RTL_FONT_SIZE + ' !important; ';
+        css += 'line-height: ' + RTL_LINE_HEIGHT + ' !important; }';
+        // Code blocks and math expressions inside RTL containers must always stay LTR
+        css += '.copilot-rtl-response pre, .copilot-rtl-response code, .copilot-rtl-response pre p, .copilot-rtl-response .katex, .copilot-rtl-response .katex-html { ';
         css += 'direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; ';
         css += 'font-family: var(--vscode-editor-font-family, monospace) !important; ';
         css += 'font-size: var(--vscode-editor-font-size, 13px) !important; }';
@@ -1711,26 +1738,138 @@ function buildAgentPatchContent(version: number): string {
     return `${MARKER_START}\n<script src="${AGENT_PATCH_JS_NAME}?v=${version}"></script>\n${MARKER_END}`;
 }
 
+function firstExistingPath(candidates: string[]): string | undefined {
+    for (const candidate of candidates) {
+        const normalized = path.normalize(candidate);
+        if (fs.existsSync(normalized)) {
+            return normalized;
+        }
+    }
+    return undefined;
+}
+
+function findFirstFileNamed(rootDir: string, fileName: string): string | undefined {
+    if (!fs.existsSync(rootDir)) {
+        return undefined;
+    }
+
+    const queue: string[] = [rootDir];
+    let index = 0;
+    const target = fileName.toLowerCase();
+
+    while (index < queue.length) {
+        const currentDir = queue[index++];
+        let entries: fs.Dirent[] = [];
+        try {
+            entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+
+        for (const entry of entries) {
+            if (entry.isFile() && entry.name.toLowerCase() === target) {
+                return path.normalize(path.join(currentDir, entry.name));
+            }
+        }
+
+        for (const entry of entries) {
+            if (entry.isDirectory()) {
+                queue.push(path.join(currentDir, entry.name));
+            }
+        }
+    }
+
+    return undefined;
+}
+
+function findFirstMatchingFile(rootDir: string, fileNames: string[]): string | undefined {
+    for (const fileName of fileNames) {
+        const found = findFirstFileNamed(rootDir, fileName);
+        if (found) {
+            return found;
+        }
+    }
+    return undefined;
+}
+
+function findFirstAgentWorkbenchHtml(rootDir: string): string | undefined {
+    if (!fs.existsSync(rootDir)) {
+        return undefined;
+    }
+
+    const queue: string[] = [rootDir];
+    let index = 0;
+
+    while (index < queue.length) {
+        const currentDir = queue[index++];
+        let entries: fs.Dirent[] = [];
+        try {
+            entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+
+        for (const entry of entries) {
+            if (!entry.isFile()) {
+                continue;
+            }
+            const lowerName = entry.name.toLowerCase();
+            if (lowerName.endsWith('.html') && lowerName.startsWith('workbench') && lowerName.includes('agent')) {
+                return path.normalize(path.join(currentDir, entry.name));
+            }
+        }
+
+        for (const entry of entries) {
+            if (entry.isDirectory()) {
+                queue.push(path.join(currentDir, entry.name));
+            }
+        }
+    }
+
+    return undefined;
+}
+
 /** Find Antigravity's agent chat panel HTML (workbench-jetski-agent.html). */
 function getAgentHtmlPath(): string | undefined {
     try {
         const appRoot = vscode.env.appRoot;
         const execDir = path.dirname(process.execPath);
 
+        // Prefer sandbox first: recent VS Code/Cursor builds often run from electron-sandbox.
         const candidates: string[] = [
-            path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
-            // Cursor uses electron-sandbox instead of electron-browser
             path.join(appRoot, 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench-jetski-agent.html'),
-            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
+            path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
             path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench-jetski-agent.html'),
-            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
             path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench-jetski-agent.html'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench-jetski-agent.html'),
         ];
 
-        for (const candidate of candidates) {
-            const normalized = path.normalize(candidate);
-            if (fs.existsSync(normalized)) {
-                return normalized;
+        const direct = firstExistingPath(candidates);
+        if (direct) {
+            return direct;
+        }
+
+        const recursiveRoots: string[] = [
+            path.join(appRoot, 'out', 'vs', 'code', 'electron-sandbox', 'workbench'),
+            path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench'),
+            path.join(appRoot, 'out', 'vs'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs'),
+        ];
+
+        for (const root of recursiveRoots) {
+            const exact = findFirstMatchingFile(root, ['workbench-jetski-agent.html']);
+            if (exact) {
+                return exact;
+            }
+            const generic = findFirstAgentWorkbenchHtml(root);
+            if (generic) {
+                return generic;
             }
         }
     } catch {
@@ -1745,30 +1884,57 @@ function getWorkbenchHtmlPath(): string | undefined {
         const appRoot = vscode.env.appRoot;
         const execDir = path.dirname(process.execPath);
 
-        // Each entry is [baseDir, fileName] pair — ordered most-likely-first
-        const candidates: [string, string][] = [
-            // VS Code 1.90+ (electron-browser layout, just "workbench.html")
-            [path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench'), 'workbench.html'],
-            // Cursor IDE (electron-sandbox layout)
-            [path.join(appRoot, 'out', 'vs', 'code', 'electron-sandbox', 'workbench'), 'workbench.html'],
-            // Older layouts that used workbench.desktop.main.html
-            [path.join(appRoot, 'out', 'vs', 'workbench'), 'workbench.desktop.main.html'],
-            [path.join(appRoot, 'out', 'vs', 'workbench'), 'workbench.esm.html'],
-            [path.join(appRoot, 'out', 'vs', 'workbench'), 'workbench.desktop.esm.html'],
-            [path.join(appRoot, 'out', 'vs', 'workbench'), 'workbench.html'],
-            // Fallbacks via process.execPath
-            [path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench'), 'workbench.html'],
-            [path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench'), 'workbench.html'],
-            [path.join(execDir, 'resources', 'app', 'out', 'vs', 'workbench'), 'workbench.desktop.main.html'],
-            [path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench'), 'workbench.html'],
-            [path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench'), 'workbench.html'],
-            [path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'workbench'), 'workbench.desktop.main.html'],
+        const workbenchNames = [
+            'workbench.html',
+            'workbench.desktop.main.html',
+            'workbench.desktop.esm.html',
+            'workbench.esm.html',
         ];
 
-        for (const [dir, fileName] of candidates) {
-            const candidate = path.normalize(path.join(dir, fileName));
-            if (fs.existsSync(candidate)) {
-                return candidate;
+        // Prefer sandbox first: when both files exist after an update,
+        // patching browser first can modify an inactive HTML file.
+        const directCandidates: string[] = [
+            path.join(appRoot, 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench.html'),
+            path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench.html'),
+            path.join(appRoot, 'out', 'vs', 'workbench', 'workbench.desktop.main.html'),
+            path.join(appRoot, 'out', 'vs', 'workbench', 'workbench.desktop.esm.html'),
+            path.join(appRoot, 'out', 'vs', 'workbench', 'workbench.esm.html'),
+            path.join(appRoot, 'out', 'vs', 'workbench', 'workbench.html'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench.html'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench.html'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.desktop.main.html'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.desktop.esm.html'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.esm.html'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.html'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench.html'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench', 'workbench.html'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.desktop.main.html'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.desktop.esm.html'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.esm.html'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'workbench', 'workbench.html'),
+        ];
+
+        const direct = firstExistingPath(directCandidates);
+        if (direct) {
+            return direct;
+        }
+
+        const recursiveRoots: string[] = [
+            path.join(appRoot, 'out', 'vs', 'code', 'electron-sandbox', 'workbench'),
+            path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench'),
+            path.join(appRoot, 'out', 'vs'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench'),
+            path.join(execDir, 'resources', 'app', 'out', 'vs'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-sandbox', 'workbench'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs', 'code', 'electron-browser', 'workbench'),
+            path.join(execDir, '..', 'resources', 'app', 'out', 'vs'),
+        ];
+
+        for (const root of recursiveRoots) {
+            const found = findFirstMatchingFile(root, workbenchNames);
+            if (found) {
+                return found;
             }
         }
     } catch {
@@ -1804,8 +1970,15 @@ async function enablePatch(htmlPath: string, fontFamily: string, fontSize: numbe
         const htmlDir = path.dirname(htmlPath);
         const jsPath = path.join(htmlDir, PATCH_JS_NAME);
 
+        // Read the extension version from package.json for the patch diagnostic log
+        let extVersion = '0.2.4';
+        try {
+            const pkgRaw = fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8');
+            extVersion = JSON.parse(pkgRaw).version ?? extVersion;
+        } catch { /* use default */ }
+
         // Always write/overwrite the JS file (updates font settings)
-        await fsp.writeFile(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign), 'utf8');
+        await fsp.writeFile(jsPath, buildScriptFileContent(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign, extVersion), 'utf8');
 
         // Write state file for immediate live toggle (no reload needed)
         try { await fsp.writeFile(path.join(htmlDir, STATE_FILE_NAME), JSON.stringify({ enabled: true }), 'utf8'); } catch { /* ignore */ }
@@ -1952,7 +2125,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // ── Auto-enable on first activation ──────────────────────────────────────
     const htmlPath = getWorkbenchHtmlPath();
-    if (htmlPath) {
+    if (!htmlPath) {
+        vscode.window.showWarningMessage(
+            'Copilot RTL: Could not locate the active workbench HTML after this update. Run "Copilot RTL: Enable" (preferably as Administrator).'
+        );
+    } else {
         try {
             const content = await fsp.readFile(htmlPath, 'utf8');
             if (!isPatched(content)) {
@@ -1961,7 +2138,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign } = getSettings();
                     const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
                     if (result.success) {
+                        const currentVersion = context.extension.packageJSON?.version ?? '';
+                        await context.globalState.update(STATE_KEY_PATCHED_VERSION, currentVersion);
                         promptReload('Copilot RTL installed and enabled automatically. Reload to apply.');
+                    } else {
+                        vscode.window.showWarningMessage(
+                            `Copilot RTL: Auto-enable failed — ${result.error}. Try running VS Code as Administrator.`
+                        );
                     }
                 }
             } else {
@@ -1970,13 +2153,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 // with a fresh ?v=timestamp, ensuring the browser loads the latest JS.
                 const { fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign } = getSettings();
                 try {
-                    await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
-                } catch {
-                    // ignore — user can still use the manual enable command
+                    const result = await enablePatch(htmlPath, fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
+                    if (result.success) {
+                        // If the extension was updated (version changed), the old patch JS
+                        // is still running in the current window. Prompt to reload so the
+                        // new patch JS (with bug fixes / new features) takes effect.
+                        const currentVersion = context.extension.packageJSON?.version ?? '';
+                        const lastPatchedVersion = context.globalState.get<string>(STATE_KEY_PATCHED_VERSION, '');
+                        if (currentVersion && currentVersion !== lastPatchedVersion) {
+                            await context.globalState.update(STATE_KEY_PATCHED_VERSION, currentVersion);
+                            promptReload(`Copilot RTL updated to v${currentVersion}. Reload to apply the new patch.`);
+                        }
+                    }
+                } catch (patchErr: unknown) {
+                    const patchMsg = patchErr instanceof Error ? patchErr.message : String(patchErr);
+                    vscode.window.showWarningMessage(
+                        `Copilot RTL: Re-patch failed — ${patchMsg}. Try running VS Code as Administrator and re-installing.`
+                    );
                 }
             }
-        } catch {
-            // If we can't read/write, the user can still use the manual command
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            vscode.window.showWarningMessage(
+                `Copilot RTL: Auto-check failed — ${message}. You can still enable manually from the Command Palette.`
+            );
         }
     }
 
