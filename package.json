@@ -2,19 +2,34 @@
   "name": "copilot-rtl",
   "displayName": "Copilot RTL",
   "description": "change the direction of copilot chat to right-to-left for Arabic",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "WaelAboSamra",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/tr-wa2el/copilot-rtl"
   },
-  "keywords": ["rtl", "right-to-left", "arabic", "persian", "copilot", "chat", "cursor", "antigravity", "WaelAboSamra"],
+  "keywords": [
+    "rtl",
+    "right-to-left",
+    "arabic",
+    "persian",
+    "copilot",
+    "chat",
+    "cursor",
+    "antigravity",
+    "WaelAboSamra"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["AI", "Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "icon": "images/icon.png",
   "contributes": {
@@ -67,7 +82,10 @@
         "copilotRtl.textAlign": {
           "type": "string",
           "default": "right",
-          "enum": ["justify", "right"],
+          "enum": [
+            "justify",
+            "right"
+          ],
           "enumDescriptions": [
             "Stretch text to fill the full line width (justified)",
             "Align text to the right edge"
@@ -97,13 +115,15 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "build:engine": "node build-engine.js",
+    "compile": "tsc -p ./ && npm run build:engine",
     "watch": "tsc -watch -p ./",
     "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.85.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.3.0"
   }
 }
