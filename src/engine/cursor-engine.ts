@@ -164,7 +164,17 @@ function updateGhostCursorFromDOM(cursorElement: Element, config: CursorConfig):
         }
     }
 
+    // ROOT FIX: Only use ghost cursor on RTL lines.
+    // LTR lines use Monaco's native cursor (which works perfectly for LTR).
     if (targetLineElement) {
+        const lineDir = targetLineElement.getAttribute('data-rtl-dir');
+        if (lineDir !== 'rtl') {
+            // This is an LTR line — let Monaco's native cursor handle it
+            hideGhostCursor();
+            monacoEditor.classList.remove(CSS_CLASS.GHOST_ATTACHED);
+            return;
+        }
+
         const targetOffset = findOffsetFromMonacoLeft(targetLineElement, monacoLeft);
         const rect = getCaretCoordinatesFromTextNode(targetLineElement, targetOffset);
 

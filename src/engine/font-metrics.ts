@@ -1,15 +1,28 @@
 /**
- * RTL Engine — Font Metrics Bridge (Layer 3)
- * Synchronizes Monaco's internal character-width cache with the actual RTL font.
+ * RTL Engine — Font Metrics Bridge (Layer 3) — ROOT FIX
+ * 
+ * CRITICAL CHANGE: NO LONGER changes Monaco's fontFamily via updateOptions().
+ * 
+ * Old approach (BROKEN):
+ *   - updateOptions({ fontFamily: 'vazirmatn' }) → changes Monaco's internal
+ *     character-width cache to Arabic font metrics → word wrap is calculated
+ *     using Arabic widths for ALL text including English → WRONG
+ *   
+ * New approach (ROOT FIX):
+ *   - Font is applied via CSS only (per-line, see rendering-patcher)
+ *   - Monaco's internal metrics stay with the default monospace font
+ *   - Only wrapping strategy and word wrap mode are set via updateOptions()
+ *   - This means English text has perfect word wrap
+ *   - Arabic word wrap won't be pixel-perfect but won't overflow
  */
 
 import { getMonacoLib } from './monaco-bridge';
 
-/** Stored original options per editor instance so we can restore on disable. */
+/** Stored original options per editor instance. */
 const _originals = new WeakMap<any, Record<string, any>>();
 
-/** Track which editors have a pending layout pass to avoid redundant calls. */
-const _layoutScheduled = new WeakSet<any>();
+/** Track which editors have been configured. */
+const _configured = new WeakSet<any>();
 
 export interface FontConfig {
     fontFamily: string;
@@ -18,49 +31,41 @@ export interface FontConfig {
 }
 
 /**
- * Apply RTL font metrics to a Monaco editor instance.
- * This calls `updateOptions()` which updates Monaco's internal character-width
- * cache so word-wrap metrics match the visual font.
+ * Configure Monaco editor for mixed RTL/LTR content.
+ * Only sets wrapping options — does NOT change fontFamily or fontSize.
+ * Font is applied via CSS per-line.
  */
-export function applyRtlFont(editorInstance: any, config: FontConfig): void {
-    if (!editorInstance) return;
-    try {
-        const fs = config.fontSize;
-        const lh = config.lineHeight;
-        if (!(fs > 0) || !(lh > 0)) return;
+export function configureForRtl(editorInstance: any): void {
+    if (!editorInstance || _configured.has(editorInstance)) return;
+    _configured.add(editorInstance);
 
+    try {
         // Save originals for restoration
         if (!_originals.has(editorInstance)) {
             const raw = editorInstance.getRawOptions?.() ?? {};
             _originals.set(editorInstance, {
-                fontSize: raw.fontSize,
-                fontFamily: raw.fontFamily,
-                lineHeight: raw.lineHeight,
                 wordWrap: raw.wordWrap,
                 wrappingStrategy: raw.wrappingStrategy,
-                allowVariableFonts: raw.allowVariableFonts,
             });
         }
 
+        // Only set wrapping — font is CSS-only
         editorInstance.updateOptions({
-            fontSize: fs,
-            fontFamily: config.fontFamily + ', sans-serif',
-            lineHeight: Math.round(fs * lh),
             wordWrap: 'on',
             wrappingStrategy: 'advanced',
-            allowVariableFonts: true,
         });
 
-        scheduleRemeasure(editorInstance);
+        scheduleLayout(editorInstance);
     } catch (e) {
-        console.error('[RTL Engine] applyRtlFont error:', e);
+        console.error('[RTL Engine] configureForRtl error:', e);
     }
 }
 
-/** Restore original font options on a Monaco editor instance. */
+/** Restore original options on a Monaco editor instance. */
 export function restoreFont(editorInstance: any): void {
     if (!editorInstance) return;
     try {
+        _configured.delete(editorInstance);
         if (_originals.has(editorInstance)) {
             editorInstance.updateOptions(_originals.get(editorInstance)!);
             _originals.delete(editorInstance);
@@ -68,7 +73,7 @@ export function restoreFont(editorInstance: any): void {
     } catch {}
 }
 
-/** Restore all tracked non-code editor fonts. */
+/** Restore all tracked non-code editor options. */
 export function restoreAllFonts(): void {
     const lib = getMonacoLib();
     if (!lib) return;
@@ -79,30 +84,11 @@ export function restoreAllFonts(): void {
     } catch {}
 }
 
-/** Schedule font remeasure + layout after font changes. */
-function scheduleRemeasure(editorInstance: any): void {
-    if (_layoutScheduled.has(editorInstance)) return;
-    _layoutScheduled.add(editorInstance);
-
-    function doRemeasure() {
+/** Schedule layout recalculation. */
+function scheduleLayout(editorInstance: any): void {
+    requestAnimationFrame(() => {
         try {
-            const lib = getMonacoLib();
-            if (lib?.editor?.remeasureFonts) lib.editor.remeasureFonts();
             editorInstance.layout();
-            if (editorInstance.render) editorInstance.render(true, true);
         } catch {}
-    }
-
-    function start() {
-        _layoutScheduled.delete(editorInstance);
-        doRemeasure();
-        setTimeout(doRemeasure, 150);
-        setTimeout(doRemeasure, 500);
-    }
-
-    if (document.fonts?.ready) {
-        document.fonts.ready.then(() => requestAnimationFrame(start));
-    } else {
-        requestAnimationFrame(start);
-    }
+    });
 }

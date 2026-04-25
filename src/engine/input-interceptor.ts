@@ -112,33 +112,13 @@ export function attachKeyboardInterceptor(): void {
 // ── IME Direction Fix ─────────────────────────────────────────────────
 
 /**
- * Set the hidden textarea direction to match current text content.
- * This fixes the IME composition window position for Arabic input.
+ * fixInputAreaDirection is now handled by direction-manager per cursor line.
+ * This function is kept as a lightweight no-op for API compatibility.
+ * The actual direction fix happens in direction-manager.fixInputAreaForCursorLine().
  */
 export function fixInputAreaDirection(): void {
-    const rtlEditors = document.querySelectorAll(`.${CSS_CLASS.EDITOR_RTL}`);
-    for (let i = 0; i < rtlEditors.length; i++) {
-        const editor = rtlEditors[i];
-        // The hidden textarea/native-edit-context
-        const inputArea = editor.querySelector('.inputarea, .native-edit-context') as HTMLElement;
-        if (inputArea) {
-            inputArea.style.direction = 'rtl';
-            inputArea.style.unicodeBidi = 'plaintext';
-        }
-    }
-
-    // Also fix non-RTL editors that were previously RTL
-    const allEditors = document.querySelectorAll('.monaco-editor');
-    for (let i = 0; i < allEditors.length; i++) {
-        const editor = allEditors[i];
-        if (!editor.classList.contains(CSS_CLASS.EDITOR_RTL)) {
-            const inputArea = editor.querySelector('.inputarea, .native-edit-context') as HTMLElement;
-            if (inputArea && inputArea.style.direction === 'rtl') {
-                inputArea.style.direction = '';
-                inputArea.style.unicodeBidi = '';
-            }
-        }
-    }
+    // Direction-manager handles this per-cursor-line now.
+    // No-op — kept for API compatibility with lifecycle manager.
 }
 
 // ── Ctrl+Shift Direction Toggle Prevention ────────────────────────────

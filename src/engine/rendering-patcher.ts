@@ -243,17 +243,27 @@ export function injectStyles(config: RenderConfig): void {
     css += `.${CSS_CLASS.RESPONSE_RTL} pre, .${CSS_CLASS.RESPONSE_RTL} code, .${CSS_CLASS.RESPONSE_RTL} pre p, .${CSS_CLASS.RESPONSE_RTL} .katex, .${CSS_CLASS.RESPONSE_RTL} .katex-html { direction: ltr !important; text-align: left !important; unicode-bidi: isolate !important; font-family: var(--vscode-editor-font-family, monospace) !important; font-size: var(--vscode-editor-font-size, 13px) !important; }`;
 
     // ── Monaco chat input RTL ─────────────────────────────────────
+    // CRITICAL: Direction is now per-LINE (set via inline styles in direction-manager)
+    // The editor-level class only controls font injection and ghost cursor.
     const v2 = CSS_CLASS.EDITOR_RTL;
-    css += `.${v2} .view-lines { unicode-bidi: plaintext !important; }`;
-    css += `.${v2} .view-line { direction: rtl !important; text-align: right !important; }`;
-    css += `.${v2} .native-edit-context { direction: rtl !important; unicode-bidi: plaintext !important; font-family: ${ff} !important; font-size: ${fs} !important; line-height: ${lh} !important; }`;
-    css += `.${v2} .inputarea { direction: rtl !important; text-align: right !important; font-family: ${ff} !important; font-size: ${fs} !important; line-height: ${lh} !important; }`;
-    css += `.${v2}.${CSS_CLASS.GHOST_ATTACHED} .cursor { visibility: hidden !important; }`;
-    css += `#${ELEMENT_ID.GHOST_CURSOR} { position: fixed; width: 2px; background-color: var(--vscode-editorCursor-foreground, #007acc); pointer-events: none; z-index: 100000; transition: top 0.05s, left 0.05s; display: none; }`;
+
+    // Per-line direction: only Arabic lines get RTL font
+    css += `.${v2} .view-line[data-rtl-dir="rtl"] span { font-family: ${ff} !important; }`;
+    css += `.${v2} .view-line[data-rtl-dir="rtl"] [class*="mtk"] { font-family: ${ff} !important; }`;
+
+    // LTR lines keep the default editor font — no override
+    // (this is what fixes English after Arabic)
+
+    // Inputarea direction is set dynamically per cursor line by direction-manager
+    // Only apply font when the editor has Arabic content somewhere
+    css += `.${v2} .native-edit-context { font-family: ${ff}, var(--vscode-editor-font-family, monospace) !important; font-size: ${fs} !important; }`;
+    css += `.${v2} .inputarea { font-family: ${ff}, var(--vscode-editor-font-family, monospace) !important; font-size: ${fs} !important; }`;
+
+    // Ghost cursor
+    css += `.${v2}.${CSS_CLASS.GHOST_ATTACHED} .view-line[data-rtl-dir="rtl"] ~ .cursors-layer .cursor { visibility: hidden !important; }`;
+    css += `#${ELEMENT_ID.GHOST_CURSOR} { position: fixed; width: 2px; background-color: var(--vscode-editorCursor-foreground, #007acc); pointer-events: none; z-index: 100000; display: none; }`;
     css += `@keyframes copilot-rtl-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }`;
     css += `#${ELEMENT_ID.GHOST_CURSOR}.blink { animation: copilot-rtl-blink 1s step-end infinite; }`;
-    css += `.${v2} [class*="mtk"] { font-family: ${ff} !important; }`;
-    css += `.${v2} .view-line span { font-family: ${ff} !important; }`;
 
     // Protect Monaco code views inside response containers
     const mdInlineCodeSels = MD_CONTAINER_SELECTORS.map(s =>

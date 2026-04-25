@@ -1,9 +1,10 @@
 /**
- * RTL Engine — Lifecycle Manager (Layer 8)
- * Main entry point for the injected script.
- * Orchestrates all engine layers: initialization, observation, and teardown.
- *
- * This file is bundled by esbuild into an IIFE and injected into workbench.html.
+ * RTL Engine — Lifecycle Manager (Layer 8) — ROOT FIX
+ * 
+ * Key changes from previous version:
+ * - processNonCodeMonacos no longer takes fontConfig (font is CSS-only)
+ * - setupInputListeners no longer takes fontConfig
+ * - Per-line direction is handled by direction-manager, not CSS
  */
 
 import { debounce } from './utils';
@@ -18,12 +19,10 @@ import { restoreAllFonts } from './font-metrics';
 import { destroyCursorEngine, hideGhostCursor } from './cursor-engine';
 import { observeSelectionLayers, destroySelectionEngine } from './selection-engine';
 import { attachKeyboardInterceptor, fixInputAreaDirection, preventDirectionToggle } from './input-interceptor';
-import type { FontConfig } from './font-metrics';
 import type { CursorConfig } from './cursor-engine';
 
 // ── Configuration ─────────────────────────────────────────────────────
-// These are injected as global `var` declarations by extension.ts at write time.
-// @ts-ignore — injected by build
+// @ts-ignore
 declare const __RTL_FONT_FAMILY__: string;
 // @ts-ignore
 declare const __RTL_FONT_SIZE__: number;
@@ -59,12 +58,6 @@ const renderConfig: RenderConfig = {
     ltrFontFamily: LTR_FONT_FAMILY,
     ltrFontSize: LTR_FONT_SIZE > 0 ? LTR_FONT_SIZE + 'px' : '',
     ltrLineHeight: LTR_LINE_HEIGHT > 0 ? String(LTR_LINE_HEIGHT) : '',
-};
-
-const fontConfig: FontConfig = {
-    fontFamily: RTL_FONT_FAMILY,
-    fontSize: RTL_FONT_SIZE,
-    lineHeight: RTL_LINE_HEIGHT,
 };
 
 const cursorConfig: CursorConfig = {
@@ -140,9 +133,8 @@ function startObserver(): void {
 
     const debouncedScan = debounce(() => {
         scanAll();
-        processNonCodeMonacos(fontConfig, cursorConfig);
+        processNonCodeMonacos(cursorConfig);
         observeSelectionLayers();
-        fixInputAreaDirection();
     }, 150);
 
     _observer = new MutationObserver(() => {
@@ -153,8 +145,6 @@ function startObserver(): void {
     _observer.observe(document.body, {
         childList: true,
         subtree: true,
-        // characterData intentionally excluded — every character streamed by
-        // the AI fires a mutation, which was the main cause of flicker.
     });
 
     scanAll();
@@ -182,6 +172,14 @@ function shutdown(): void {
     restoreAllFonts();
     destroyCursorEngine();
     destroySelectionEngine();
+
+    // Clean per-line direction attributes
+    document.querySelectorAll('[data-rtl-dir]').forEach(el => {
+        (el as HTMLElement).style.direction = '';
+        (el as HTMLElement).style.textAlign = '';
+        (el as HTMLElement).style.unicodeBidi = '';
+        el.removeAttribute('data-rtl-dir');
+    });
 }
 
 function reinitialize(): void {
@@ -191,13 +189,12 @@ function reinitialize(): void {
     if (_mainInterval) clearInterval(_mainInterval);
     _mainInterval = setInterval(() => {
         scanAll();
-        processNonCodeMonacos(fontConfig, cursorConfig);
+        processNonCodeMonacos(cursorConfig);
         scanLexicalInputs(renderConfig);
         observeSelectionLayers();
-        fixInputAreaDirection();
     }, 3000);
     scanAll();
-    processNonCodeMonacos(fontConfig, cursorConfig);
+    processNonCodeMonacos(cursorConfig);
     scanLexicalInputs(renderConfig);
 }
 
@@ -219,7 +216,7 @@ function startStatePolling(): void {
 // ── BOOT ──────────────────────────────────────────────────────────────
 
 function boot(): void {
-    console.log(`[RTL Engine] v${EXT_VERSION} loaded ✓`);
+    console.log(`[RTL Engine] v${EXT_VERSION} loaded ✓ (per-line direction)`);
     document.documentElement.setAttribute('data-copilot-rtl', EXT_VERSION);
 
     suppressKatexWarnings();
@@ -227,34 +224,26 @@ function boot(): void {
     injectStyles(renderConfig);
     startObserver();
 
-    // Phase 4: Input handling
     setupLexicalInputListener();
-    setupInputListeners(fontConfig, cursorConfig);
+    setupInputListeners(cursorConfig);
     attachKeyboardInterceptor();
     preventDirectionToggle();
 
-    // When Monaco is ready, do an initial scan of all editors
     onMonacoReady(() => {
-        processNonCodeMonacos(fontConfig, cursorConfig);
+        processNonCodeMonacos(cursorConfig);
         observeSelectionLayers();
-        fixInputAreaDirection();
     });
 
-    // Periodic fallback scan
     _mainInterval = setInterval(() => {
         scanAll();
-        processNonCodeMonacos(fontConfig, cursorConfig);
+        processNonCodeMonacos(cursorConfig);
         scanLexicalInputs(renderConfig);
         observeSelectionLayers();
-        fixInputAreaDirection();
     }, 3000);
 
-    // Initial scans
-    processNonCodeMonacos(fontConfig, cursorConfig);
+    processNonCodeMonacos(cursorConfig);
     scanLexicalInputs(renderConfig);
-    fixInputAreaDirection();
 
-    // Live toggle support
     startStatePolling();
 }
 
