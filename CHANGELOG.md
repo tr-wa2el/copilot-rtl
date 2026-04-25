@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0] - 2026-04-25
+
+### Added
+- Status bar toggle button (`$(globe) RTL`) to quickly enable/disable Copilot RTL and show current state
+- New command **`Copilot RTL: Toggle On/Off`** for one-click switching from the Command Palette
+- Automatic first-run patch install/enable on activation (unless the user explicitly disabled it)
+- Automatic re-patch on extension update to ensure the latest injected script is loaded
+
+### Changed
+- Workbench path detection now prioritizes `electron-sandbox` and uses recursive fallback search under `appRoot`/`execDir` to better survive VS Code/Cursor layout changes
+- Improved startup warnings when workbench detection or auto-enable fails, with clearer manual-enable/admin guidance
+- Default **`copilotRtl.textAlign`** changed to `right`
+
+### Fixed
+- Reduced cases where patching targeted an inactive workbench HTML after host app updates
+- Monaco chat input now uses a synchronized ghost cursor overlay in RTL mode to improve caret visual accuracy
+- Monaco code editors rendered inside chat responses are explicitly kept LTR to prevent inherited RTL layout issues
+
 ## [0.1.9] - 2026-04-18
 
 ### Fixed
