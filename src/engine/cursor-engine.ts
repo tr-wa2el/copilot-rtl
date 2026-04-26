@@ -1,14 +1,15 @@
 /**
- * RTL Engine — Cursor Engine (Layer 4) v3
+ * RTL Engine — Cursor Engine (Layer 4) v4
  *
- * Hybrid approach:
- * - RTL lines: Monaco getScrolledVisiblePosition() works correctly ✓
- * - LTR lines: Monaco returns editorW for all positions (bug in RTL container),
- *   so we use DOM Range API on the actual view-line element instead.
+ * Hybrid cursor positioning:
+ * - RTL lines: Monaco getScrolledVisiblePosition() → verified correct from debug data
+ * - LTR lines: DOM Range API on actual view-line → Monaco API broken for LTR in RTL container
+ *
+ * Detection: data-rtl-dir attribute OR visualPos.left >= editorWidth (Monaco LTR-broken signal)
  */
 
 import { CSS_CLASS, ELEMENT_ID } from './constants';
-import { isMainCodeEditor, getCaretCoordinatesFromTextNode } from './utils';
+import { isMainCodeEditor } from './utils';
 import { findEditorForDom, getNonCodeEditors } from './monaco-bridge';
 
 let _ghostCursor: HTMLElement | null = null;
@@ -50,39 +51,60 @@ function showGhostCursor(monacoEditor: Element, left: number, top: number, heigh
     }
 }
 
-// ── LTR fallback: DOM Range on actual view-line ────────────────────────
-// Monaco's getScrolledVisiblePosition returns editorWidth for all LTR
-// columns in an RTL container — it's broken for LTR in RTL context.
-// DOM Range gives us the actual rendered glyph position.
+// ── LTR cursor: DOM Range on actual view-line ─────────────────────────
+// Monaco's getScrolledVisiblePosition returns editorWidth (stuck) for LTR
+// in RTL containers. DOM Range gives actual rendered glyph position.
 
 function getLtrCursorFromDom(
     viewLineEl: HTMLElement,
-    column: number,   // 1-based Monaco column
+    column: number,          // Monaco 1-based column
     monacoEditor: Element,
     config: CursorConfig
-): void {
-    // Build text-node offset from logical column
+): boolean {
+    // Walk text nodes, sum character counts to reach Monaco column
     const walker = document.createTreeWalker(viewLineEl, NodeFilter.SHOW_TEXT, null);
-    let remaining = column - 1; // column is 1-based
-    let node: Text | null = null;
-    let offset = 0;
+    let remaining = column - 1; // convert to 0-based offset
+    let targetNode: Text | null = null;
+    let targetOffset = 0;
 
     while (walker.nextNode()) {
         const t = walker.currentNode as Text;
         const len = t.nodeValue!.length;
-        if (remaining <= len) { node = t; offset = remaining; break; }
+        if (remaining <= len) {
+            targetNode = t;
+            targetOffset = remaining;
+            break;
+        }
         remaining -= len;
     }
-    if (!node) return;
 
-    const range = document.createRange();
-    range.setStart(node, offset);
-    range.setEnd(node, offset);
-    const rect = range.getBoundingClientRect();
-    if (!rect.width && !rect.height) return; // degenerate range
+    if (!targetNode) {
+        // Column beyond text — use end of last text node
+        const walker2 = document.createTreeWalker(viewLineEl, NodeFilter.SHOW_TEXT, null);
+        let last: Text | null = null;
+        while (walker2.nextNode()) last = walker2.currentNode as Text;
+        if (!last) return false;
+        targetNode = last;
+        targetOffset = last.nodeValue!.length;
+    }
 
-    const height = parseFloat(config.fontSize) * parseFloat(config.lineHeight) || 20;
-    showGhostCursor(monacoEditor, rect.left, rect.top, height);
+    try {
+        const range = document.createRange();
+        range.setStart(targetNode, targetOffset);
+        range.setEnd(targetNode, targetOffset);
+        const rect = range.getBoundingClientRect();
+        if (!rect.top && !rect.height && !rect.left) return false;
+
+        const height = visualLineHeight(viewLineEl) || parseFloat(config.fontSize) * parseFloat(config.lineHeight) || 20;
+        showGhostCursor(monacoEditor, rect.left, rect.top, height);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function visualLineHeight(lineEl: HTMLElement): number {
+    return lineEl.getBoundingClientRect().height || 0;
 }
 
 // ── Main ghost cursor update ──────────────────────────────────────────
@@ -107,41 +129,34 @@ function updateGhostFromEditorApi(
         const ghostH = visualPos.height
             || parseFloat(config.fontSize) * parseFloat(config.lineHeight) || 20;
 
-        // Find the view-line for this visual top offset (to detect LTR vs RTL)
+        // Find the view-line matching this vertical offset
         const viewLines = monacoEditor.querySelectorAll('.view-line');
         let lineEl: HTMLElement | null = null;
         for (let i = 0; i < viewLines.length; i++) {
             const vl = viewLines[i] as HTMLElement;
             const vlTop = vl.getBoundingClientRect().top - editorRect.top;
-            if (Math.abs(vlTop - visualPos.top) < 3) { lineEl = vl; break; }
+            if (Math.abs(vlTop - visualPos.top) < 4) { lineEl = vl; break; }
         }
 
-        // Determine if this line is LTR
+        // Detect LTR:
+        // Primary:  data-rtl-dir="ltr" set by direction-manager MutationObserver
+        // Fallback: visualPos.left == editorWidth → Monaco's broken LTR signal
         const isLtr = lineEl?.getAttribute('data-rtl-dir') === 'ltr'
-            // fallback: if visualLeft == editorW, Monaco is reporting LTR-broken value
             || visualPos.left >= editorRect.width - 2;
 
         if (isLtr) {
-            // ── LTR strategy: read Monaco's OWN cursor element ─────────────
-            // Monaco computes .cursors-layer .cursor style.left CORRECTLY for LTR.
-            // Even with opacity:0, getBoundingClientRect() returns visual position.
-            // getScrolledVisiblePosition is broken for LTR in RTL containers.
-            const monacoNativeCursor = monacoEditor.querySelector(
-                '.cursors-layer .cursor'
-            ) as HTMLElement | null;
-            if (monacoNativeCursor) {
-                const cr = monacoNativeCursor.getBoundingClientRect();
-                if (cr.width > 0 || cr.height > 0) {
-                    showGhostCursor(monacoEditor, cr.left, cr.top, cr.height || ghostH);
-                    return;
-                }
+            // LTR strategy: DOM Range on the actual rendered view-line
+            // Monaco's visualPos.left is stuck at editorWidth for LTR in RTL container.
+            if (lineEl && getLtrCursorFromDom(lineEl, pos.column, monacoEditor, config)) {
+                return;
             }
-            // fallback: show ghost at editorRect.left (beginning of LTR line)
+            // Fallback: place at editor left edge for this row
             showGhostCursor(monacoEditor, editorRect.left, editorRect.top + visualPos.top, ghostH);
             return;
         }
 
-        // RTL: Monaco's visualLeft is correct (verified from debug data)
+        // RTL strategy: Monaco's getScrolledVisiblePosition is correct for RTL
+        // (verified from debug data: values decrease correctly as Arabic chars typed)
         showGhostCursor(
             monacoEditor,
             editorRect.left + visualPos.left,
@@ -153,10 +168,10 @@ function updateGhostFromEditorApi(
     }
 }
 
-// ── Cursor Layers (no-op — driven by onDidChangeCursorPosition) ───────
+// ── Cursor Layers (no-op — driven by onDidChangeCursorPosition) ────────
 export function observeCursorLayers(_config: CursorConfig): void {}
 
-// ── Click Interceptor ─────────────────────────────────────────────────
+// ── Click Interceptor ──────────────────────────────────────────────────
 export function attachClickInterceptor(): void {
     if (_pointerdownAttached) return;
     _pointerdownAttached = true;
@@ -180,7 +195,7 @@ export function attachClickInterceptor(): void {
     }, true);
 }
 
-// ── Editor Lifecycle ──────────────────────────────────────────────────
+// ── Editor Lifecycle ───────────────────────────────────────────────────
 export function attachClickHandler(editorInstance: any, config?: CursorConfig): void {
     if (!editorInstance || _attachedEditors.has(editorInstance)) return;
     _attachedEditors.add(editorInstance);
@@ -189,11 +204,20 @@ export function attachClickHandler(editorInstance: any, config?: CursorConfig): 
         const monacoEditor = domNode?.closest('.monaco-editor') ?? domNode;
         if (!monacoEditor) return;
         const cfg = config ?? { fontSize: '14', lineHeight: '1.8' };
-        editorInstance.onDidChangeCursorPosition?.(() =>
-            updateGhostFromEditorApi(editorInstance, monacoEditor, cfg));
-        editorInstance.onDidFocusEditorText?.(() => {
-            if (monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL))
+        editorInstance.onDidChangeCursorPosition?.(() => {
+            // Defer by one tick so MutationObserver can set data-rtl-dir first
+            // (MutationObserver runs as microtask, setTimeout runs after)
+            setTimeout(() => {
+                // Only update if THIS editor is focused (prevents editor2 override)
+                if (!editorInstance.hasTextFocus?.()) return;
                 updateGhostFromEditorApi(editorInstance, monacoEditor, cfg);
+            }, 0);
+        });
+        editorInstance.onDidFocusEditorText?.(() => {
+            setTimeout(() => {
+                if (monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL))
+                    updateGhostFromEditorApi(editorInstance, monacoEditor, cfg);
+            }, 0);
         });
         editorInstance.onDidBlurEditorText?.(() => hideGhostCursor());
     } catch {}
