@@ -300,9 +300,19 @@ export function injectStyles(config: RenderConfig): void {
     // Ghost cursor handles ALL lines (RTL mirrored + LTR direct).
     // Using permanent CSS rule (not class-toggled) eliminates the double-cursor flicker.
     css += `${parentSel} .cursors-layer .cursor, ${selfSel} .cursors-layer .cursor { opacity: 0 !important; }`;
-    css += `#${ELEMENT_ID.GHOST_CURSOR} { position: fixed; width: 2px; background-color: var(--vscode-editorCursor-foreground, #007acc); pointer-events: none; z-index: 100000; display: none; }`;
+    css += `#${ELEMENT_ID.GHOST_CURSOR} { position: fixed; width: 2px; background-color: var(--vscode-editorCursor-foreground, #007acc); pointer-events: none; z-index: 100000; display: none; overflow: visible; }`;
     css += `@keyframes copilot-rtl-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }`;
     css += `#${ELEMENT_ID.GHOST_CURSOR}.blink { animation: copilot-rtl-blink 1s step-end infinite; }`;
+
+    // Directional cursor flag: a small horizontal line at the top indicating text direction.
+    // RTL cursor (Arabic): flag points RIGHT → tiny bar on top-right of cursor bar
+    // LTR cursor (English): flag points LEFT → tiny bar on top-left of cursor bar
+    css += `#${ELEMENT_ID.GHOST_CURSOR}::before {
+        content: ''; position: absolute; top: 0; width: 5px; height: 2px;
+        background-color: var(--vscode-editorCursor-foreground, #007acc);
+    }`;
+    css += `#${ELEMENT_ID.GHOST_CURSOR}.dir-rtl::before { right: 0; }`;
+    css += `#${ELEMENT_ID.GHOST_CURSOR}.dir-ltr::before { left: 0; }`;
 
 
 

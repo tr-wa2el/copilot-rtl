@@ -37,12 +37,19 @@ export function hideGhostCursor(): void {
     if (_ghostCursor) _ghostCursor.style.display = 'none';
 }
 
-function showGhostCursor(monacoEditor: Element, left: number, top: number, height: number): void {
+function showGhostCursor(
+    monacoEditor: Element,
+    left: number, top: number, height: number,
+    isLtr: boolean = false
+): void {
     const gc = getOrCreateGhostCursor();
     gc.style.display = 'block';
     gc.style.left   = left   + 'px';
     gc.style.top    = top    + 'px';
     gc.style.height = height + 'px';
+    // Direction class — drives the ::before flag indicator in CSS
+    gc.classList.remove('dir-rtl', 'dir-ltr');
+    gc.classList.add(isLtr ? 'dir-ltr' : 'dir-rtl');
     gc.classList.remove('blink');
     void gc.offsetWidth;
     gc.classList.add('blink');
@@ -57,9 +64,10 @@ function showGhostCursor(monacoEditor: Element, left: number, top: number, heigh
 
 function getLtrCursorFromDom(
     viewLineEl: HTMLElement,
-    column: number,          // Monaco 1-based column
+    column: number,
     monacoEditor: Element,
-    config: CursorConfig
+    config: CursorConfig,
+    isLtr: boolean = true
 ): boolean {
     // Walk text nodes, sum character counts to reach Monaco column
     const walker = document.createTreeWalker(viewLineEl, NodeFilter.SHOW_TEXT, null);
@@ -96,7 +104,7 @@ function getLtrCursorFromDom(
         if (!rect.top && !rect.height && !rect.left) return false;
 
         const height = visualLineHeight(viewLineEl) || parseFloat(config.fontSize) * parseFloat(config.lineHeight) || 20;
-        showGhostCursor(monacoEditor, rect.left, rect.top, height);
+        showGhostCursor(monacoEditor, rect.left, rect.top, height, isLtr);
         return true;
     } catch {
         return false;
@@ -138,30 +146,56 @@ function updateGhostFromEditorApi(
             if (Math.abs(vlTop - visualPos.top) < 4) { lineEl = vl; break; }
         }
 
-        // Detect LTR:
-        // Primary:  data-rtl-dir="ltr" set by direction-manager MutationObserver
-        // Fallback: visualPos.left == editorWidth → Monaco's broken LTR signal
-        const isLtr = lineEl?.getAttribute('data-rtl-dir') === 'ltr'
+        // ── POSITIONING STRATEGY: based on line direction ────────────────
+        // RTL lines → Monaco's getScrolledVisiblePosition (verified accurate)
+        // LTR lines → DOM Range (Monaco returns wrong value in RTL container)
+        const isLtrLine = lineEl?.getAttribute('data-rtl-dir') === 'ltr'
             || visualPos.left >= editorRect.width - 2;
 
-        if (isLtr) {
+        // ── CURSOR FLAG DIRECTION: last STRONG directional character ────
+        // Skip neutral chars (space, digits, punctuation) — search backwards
+        // from cursor position for the nearest Arabic or Latin LETTER.
+        const ARABIC_RE  = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+        const LATIN_RE   = /[a-zA-Z]/;
+        let cursorIsLtr: boolean;
+        try {
+            const model = editorInstance.getModel?.();
+            const lineText: string = model?.getLineContent(pos.lineNumber) ?? '';
+            // Walk backwards from cursor to find last strong directional character
+            let strongChar = '';
+            for (let i = pos.column - 2; i >= 0; i--) {
+                const ch = lineText[i];
+                if (ARABIC_RE.test(ch) || LATIN_RE.test(ch)) { strongChar = ch; break; }
+            }
+            // If no strong char before, look forward
+            if (!strongChar) {
+                for (let i = pos.column - 1; i < lineText.length; i++) {
+                    const ch = lineText[i];
+                    if (ARABIC_RE.test(ch) || LATIN_RE.test(ch)) { strongChar = ch; break; }
+                }
+            }
+            cursorIsLtr = strongChar ? LATIN_RE.test(strongChar) : isLtrLine;
+        } catch {
+            cursorIsLtr = isLtrLine;
+        }
+
+        if (isLtrLine) {
             // LTR strategy: DOM Range on the actual rendered view-line
-            // Monaco's visualPos.left is stuck at editorWidth for LTR in RTL container.
-            if (lineEl && getLtrCursorFromDom(lineEl, pos.column, monacoEditor, config)) {
+            if (lineEl && getLtrCursorFromDom(lineEl, pos.column, monacoEditor, config, cursorIsLtr)) {
                 return;
             }
             // Fallback: place at editor left edge for this row
-            showGhostCursor(monacoEditor, editorRect.left, editorRect.top + visualPos.top, ghostH);
+            showGhostCursor(monacoEditor, editorRect.left, editorRect.top + visualPos.top, ghostH, cursorIsLtr);
             return;
         }
 
         // RTL strategy: Monaco's getScrolledVisiblePosition is correct for RTL
-        // (verified from debug data: values decrease correctly as Arabic chars typed)
         showGhostCursor(
             monacoEditor,
             editorRect.left + visualPos.left,
             editorRect.top  + visualPos.top,
-            ghostH
+            ghostH,
+            cursorIsLtr  // ← character-level direction
         );
     } catch {
         hideGhostCursor();
@@ -235,6 +269,13 @@ export function attachClickInterceptor(): void {
     if (_pointerdownAttached) return;
     _pointerdownAttached = true;
 
+    // ── Initial cursor direction from system language ──────────────────
+    // Set the ghost cursor direction based on the OS/browser language
+    // so it's correct from the first moment (before any typing).
+    const systemIsRtl = /^ar|^he|^fa|^ur/.test(navigator.language ?? '');
+    // Will be applied when ghost cursor is first shown (see showGhostCursor)
+    // We store it for use in the keyboard detector below.
+
     document.addEventListener('pointerdown', (e: PointerEvent) => {
         const target = e.target as Element;
         const monacoEditor = target?.closest?.('.monaco-editor');
@@ -247,29 +288,14 @@ export function attachClickInterceptor(): void {
             ? viewLine.getAttribute('data-rtl-dir') !== 'ltr'
             : false;
 
-        // DEBUG
-        const dbgRange = (document as any).caretRangeFromPoint?.(e.clientX, e.clientY);
-        console.log(
-            `[RTL-CLICK] target=${(target as HTMLElement).className?.substring(0,30)}` +
-            ` viewLine=${!!viewLine} isRtlLine=${isRtlLine}` +
-            `\n  caretRange: node=${dbgRange?.startContainer?.nodeType}` +
-            ` offset=${dbgRange?.startOffset}` +
-            ` inViewLine=${viewLine ? viewLine.contains(dbgRange?.startContainer) : 'N/A'}` +
-            ` text="${dbgRange?.startContainer?.nodeValue?.substring(0,15) ?? 'N/A'}"`
-        );
-
         if (!viewLine || !isRtlLine) return;
 
         const editorRecords = getNonCodeEditors();
         const editorInstance = findEditorForDom(monacoEditor, editorRecords);
         if (!editorInstance) return;
 
-        const column = getColumnFromCaretPoint(viewLine, e.clientX, e.clientY);
+        const column     = getColumnFromCaretPoint(viewLine, e.clientX, e.clientY);
         const lineNumber = getLineNumberFromViewLine(viewLine, editorInstance);
-
-        console.log(`[RTL-CLICK] → column=${column} lineNumber=${lineNumber}` +
-            ` viewLineTop="${viewLine.style.top}"` +
-            ` lineH=${editorInstance.getOption?.(67)} scrollTop=${editorInstance.getScrollTop?.()}`);
 
         if (column === null || lineNumber === null) return;
 
@@ -281,9 +307,41 @@ export function attachClickInterceptor(): void {
         }, 0);
     }, true);
 
-    // RTL click interception is handled by pointerdown above.
-    // LTR lines use Monaco's native click (which works correctly for LTR).
+    // ── Keyboard Language Detector ─────────────────────────────────────
+    // e.key gives the actual character BEFORE it appears in the editor.
+    // This lets the cursor flag flip instantly when keyboard language changes.
+    const ARABIC_KEY_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+    // Only ACTUAL Latin LETTERS flip to LTR — NOT spaces, digits, or punctuation (bidi-neutral)
+    const LATIN_KEY_RE  = /^[a-zA-Z]$/;
+
+    // Track last known keyboard direction so we can apply it when editor gains focus
+    let _lastKbdIsLtr = !systemIsRtl;
+
+    document.addEventListener('keydown', (e: KeyboardEvent) => {
+        const key = e.key;
+        if (!key || key.length !== 1) return;
+
+        const target = e.target as Element;
+        const monacoEditor = target?.closest?.('.monaco-editor');
+        if (!monacoEditor || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) return;
+        if (isMainCodeEditor(monacoEditor)) return;
+
+        if (ARABIC_KEY_RE.test(key)) {
+            _lastKbdIsLtr = false;
+        } else if (LATIN_KEY_RE.test(key)) {
+            _lastKbdIsLtr = true;
+        } else {
+            return; // Punctuation/numbers stay with last known direction
+        }
+
+        // Immediately flip the ghost cursor flag
+        const gc = _ghostCursor;
+        if (!gc || gc.style.display === 'none') return;
+        gc.classList.remove('dir-rtl', 'dir-ltr');
+        gc.classList.add(_lastKbdIsLtr ? 'dir-ltr' : 'dir-rtl');
+    }, true);
 }
+
 
 // ── Editor Lifecycle ───────────────────────────────────────────────────
 export function attachClickHandler(editorInstance: any, config?: CursorConfig): void {
