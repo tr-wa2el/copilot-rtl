@@ -16,6 +16,14 @@ let _ghostCursor: HTMLElement | null = null;
 const _attachedEditors = new WeakSet<any>();
 let _pointerdownAttached = false;
 
+// ── Keyboard direction state (module-level) ───────────────────────────
+// Tracks the direction set by keyboard events (Alt+Shift / first keypress).
+// This state persists even when the ghost cursor element doesn't exist yet,
+// and takes PRIORITY over text-based detection for KBD_PRIORITY_MS ms.
+let _kbdIsLtr: boolean = true;       // default: LTR until keyboard detected
+let _kbdSetAt: number  = 0;          // timestamp of last keyboard-based set
+const KBD_PRIORITY_MS  = 2000;       // keyboard wins over text for 2 seconds
+
 export interface CursorConfig { fontSize: string; lineHeight: string; }
 
 // ── Ghost Cursor Element ──────────────────────────────────────────────
@@ -40,16 +48,19 @@ export function hideGhostCursor(): void {
 function showGhostCursor(
     monacoEditor: Element,
     left: number, top: number, height: number,
-    isLtr: boolean = false
+    textIsLtr: boolean = false   // direction from text detection
 ): void {
     const gc = getOrCreateGhostCursor();
     gc.style.display = 'block';
     gc.style.left   = left   + 'px';
     gc.style.top    = top    + 'px';
     gc.style.height = height + 'px';
-    // Direction class — drives the ::before flag indicator in CSS
+    // Keyboard direction takes priority for KBD_PRIORITY_MS after a layout switch.
+    // After that, text-based detection takes over.
+    const useKbd = (Date.now() - _kbdSetAt) < KBD_PRIORITY_MS;
+    const dirIsLtr = useKbd ? _kbdIsLtr : textIsLtr;
     gc.classList.remove('dir-rtl', 'dir-ltr');
-    gc.classList.add(isLtr ? 'dir-ltr' : 'dir-rtl');
+    gc.classList.add(dirIsLtr ? 'dir-ltr' : 'dir-rtl');
     gc.classList.remove('blink');
     void gc.offsetWidth;
     gc.classList.add('blink');
@@ -309,62 +320,59 @@ export function attachClickInterceptor(): void {
 
     // ── Keyboard Language Detector ─────────────────────────────────────
     const ARABIC_KEY_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
-    // Only actual Latin letters flip to LTR — spaces/digits/punctuation are bidi-neutral
     const LATIN_KEY_RE  = /^[a-zA-Z]$/;
-
-    // Track last known keyboard direction
     let _lastKbdIsLtr = !systemIsRtl;
+    // Sync module-level state with systemIsRtl
+    _kbdIsLtr = !systemIsRtl;
 
     function applyKbdDirection(isLtr: boolean): void {
         _lastKbdIsLtr = isLtr;
-        const gc = _ghostCursor;
-        if (!gc || gc.style.display === 'none') return;
+        _kbdIsLtr  = isLtr;
+        _kbdSetAt  = Date.now();
+        // Apply immediately to the ghost cursor (create if needed)
+        const gc = getOrCreateGhostCursor();
         gc.classList.remove('dir-rtl', 'dir-ltr');
         gc.classList.add(isLtr ? 'dir-ltr' : 'dir-rtl');
     }
 
-    // ── Method 1: navigator.keyboard.getLayoutMap() ──────────────────────
-    // Fires ON Alt+Shift (before any typing) in Chromium/Electron.
-    // KeyA maps to 'ش' on Arabic keyboard, 'a' on English keyboard.
     const kb = (navigator as any).keyboard;
-    if (kb && typeof kb.getLayoutMap === 'function') {
-        const checkLayout = async () => {
-            try {
-                const layoutMap = await kb.getLayoutMap();
-                const aChar: string = layoutMap.get('KeyA') ?? '';
-                applyKbdDirection(!ARABIC_KEY_RE.test(aChar));
-            } catch {}
-        };
 
-        // Check on startup
-        checkLayout();
-
-        // Listen for layout changes (fires on Alt+Shift / Win+Space)
-        if (typeof kb.addEventListener === 'function') {
-            kb.addEventListener('layoutchange', checkLayout);
-        }
+    async function checkLayout(): Promise<void> {
+        if (!kb || typeof kb.getLayoutMap !== 'function') return;
+        try {
+            const layoutMap = await kb.getLayoutMap();
+            const aChar: string = layoutMap.get('KeyA') ?? '';
+            applyKbdDirection(!ARABIC_KEY_RE.test(aChar));
+        } catch { }
     }
 
-    // ── Method 2: keydown fallback ───────────────────────────────────────
-    // Updates on the FIRST character typed after a layout switch,
-    // as a fallback if navigator.keyboard is unavailable/restricted.
+    // Check on startup
+    checkLayout();
+
+    // ── Alt+Shift detection via keyup ─────────────────────────────────
+    // VS Code intercepts Alt+Shift so `layoutchange` never fires.
+    // But keyup on Alt/Shift DOES fire, and the OS layout is already
+    // updated by then. We check 100ms after to let the OS settle.
+    document.addEventListener('keyup', (e: KeyboardEvent) => {
+        if (e.key === 'Alt' || e.key === 'Shift') {
+            setTimeout(checkLayout, 100);
+        }
+    }, true);
+
+    // ── keydown: update on first keypress (fallback + char-level) ─────
     document.addEventListener('keydown', (e: KeyboardEvent) => {
         const key = e.key;
         if (!key || key.length !== 1) return;
-
         const target = e.target as Element;
         const monacoEditor = target?.closest?.('.monaco-editor');
         if (!monacoEditor || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) return;
         if (isMainCodeEditor(monacoEditor)) return;
-
-        if (ARABIC_KEY_RE.test(key)) {
-            applyKbdDirection(false);
-        } else if (LATIN_KEY_RE.test(key)) {
-            applyKbdDirection(true);
-        }
-        // Neutral chars (space/digits/punct): keep last direction
+        if (ARABIC_KEY_RE.test(key))     applyKbdDirection(false);
+        else if (LATIN_KEY_RE.test(key)) applyKbdDirection(true);
+        // Neutral (space/digits/punct): keep last direction
     }, true);
 }
+
 
 
 
