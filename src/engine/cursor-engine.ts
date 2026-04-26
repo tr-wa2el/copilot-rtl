@@ -235,10 +235,9 @@ export function attachClickInterceptor(): void {
     if (_pointerdownAttached) return;
     _pointerdownAttached = true;
 
-    // ── Initial cursor direction from system language ──────────────────
-    // (Removed — directional flag feature removed)
-
-    document.addEventListener('pointerdown', (e: PointerEvent) => {
+    // Use mousedown (not pointerdown) — PointerEvent.detail is always 0 in Electron.
+    // MouseEvent.detail correctly counts: 1=single, 2=double, 3=triple.
+    document.addEventListener('mousedown', (e: MouseEvent) => {
         const target = e.target as Element;
         const monacoEditor = target?.closest?.('.monaco-editor');
         if (!monacoEditor || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) return;
@@ -252,6 +251,9 @@ export function attachClickInterceptor(): void {
 
         if (!viewLine || !isRtlLine) return;
 
+        // Triple-click: let Monaco handle (line selection)
+        if (e.detail > 2) return;
+
         const editorRecords = getNonCodeEditors();
         const editorInstance = findEditorForDom(monacoEditor, editorRecords);
         if (!editorInstance) return;
@@ -263,13 +265,58 @@ export function attachClickInterceptor(): void {
 
         e.preventDefault();
         e.stopPropagation();
-        setTimeout(() => {
-            editorInstance.setPosition({ lineNumber, column });
-            editorInstance.focus();
-        }, 0);
+
+        if (e.detail === 2) {
+            // Double-click: Arabic-aware word selection
+            setTimeout(() => {
+                const model = editorInstance.getModel?.();
+                if (!model) { editorInstance.setPosition({ lineNumber, column }); return; }
+
+                const lineText: string = model.getLineContent(lineNumber);
+                const WORD_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\w]/;
+
+                const clickedChar = lineText[column - 1] ?? '';
+                if (!WORD_RE.test(clickedChar)) {
+                    editorInstance.setPosition({ lineNumber, column });
+                    editorInstance.focus();
+                    return;
+                }
+
+                let startCol = column;
+                while (startCol > 1 && WORD_RE.test(lineText[startCol - 2] ?? '')) { startCol--; }
+                let endCol = column;
+                while (endCol <= lineText.length && WORD_RE.test(lineText[endCol - 1] ?? '')) { endCol++; }
+
+                editorInstance.setSelection({
+                    startLineNumber: lineNumber, startColumn: startCol,
+                    endLineNumber:   lineNumber, endColumn:   endCol,
+                });
+                editorInstance.focus();
+            }, 0);
+        } else {
+            // Single click: RTL-correct cursor positioning
+            setTimeout(() => {
+                editorInstance.setPosition({ lineNumber, column });
+                editorInstance.focus();
+            }, 0);
+        }
+    }, true);
+
+    // Block dblclick event — Monaco also listens on this for word selection
+    document.addEventListener('dblclick', (e: MouseEvent) => {
+        const target = e.target as Element;
+        const monacoEditor = target?.closest?.('.monaco-editor');
+        if (!monacoEditor || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) return;
+        if (isMainCodeEditor(monacoEditor)) return;
+        const vl = target.closest?.('.view-line') as HTMLElement | null;
+        if (!vl || vl.getAttribute('data-rtl-dir') === 'ltr') return;
+        e.preventDefault();
+        e.stopPropagation();
     }, true);
 
 }
+
+
 
 
 
