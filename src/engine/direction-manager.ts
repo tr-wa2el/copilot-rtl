@@ -189,10 +189,9 @@ export function processNonCodeMonacos(fontConfig: FontConfig, cursorConfig: Curs
         const editorInstance = findEditorForDom(editor, editorRecords);
         fixInputAreaForCursorLine(editor, editorInstance);
 
-        // applyRtlFont is a no-op (Monaco API inaccessible — window.require=null)
         if (editorInstance) {
             applyRtlFont(editorInstance, fontConfig);
-            attachClickHandler(editorInstance);
+            attachClickHandler(editorInstance, cursorConfig);
         }
     }
 }

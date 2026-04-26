@@ -276,17 +276,29 @@ export function injectStyles(config: RenderConfig): void {
     css += `${parentSel} .view-line${notLtr} [class*="mtk"], ${selfSel} .view-line${notLtr} [class*="mtk"] { font-family: ${ff} !important; font-size: ${fs} !important; line-height: ${lh} !important; }`;
     css += `${parentSel} .view-line${notLtr}, ${selfSel} .view-line${notLtr} { font-family: ${ff} !important; font-size: ${fs} !important; line-height: ${lh} !important; }`;
 
-    // DIRECTION: unicode-bidi: plaintext lets the browser auto-detect per line.
-    css += `${parentSel} .view-line, ${selfSel} .view-line { direction: rtl !important; unicode-bidi: plaintext !important; }`;
-    css += `${parentSel} .view-lines, ${selfSel} .view-lines { direction: rtl !important; unicode-bidi: plaintext !important; }`;
+    // DIRECTION: RTL container, per-line via data-rtl-dir attribute.
+    // .view-lines container is RTL. Each .view-line defaults to RTL.
+    // English lines get [data-rtl-dir="ltr"] set SYNCHRONOUSLY by MutationObserver
+    // (runs as microtask before paint → zero flicker).
+    css += `${parentSel} .view-lines, ${selfSel} .view-lines { direction: rtl !important; unicode-bidi: plaintext !important; padding-right: 8px !important; }`; // ← 8px padding from RTL edge
+
+    // RTL lines (Arabic): explicit RTL + right-aligned
+    css += `${parentSel} .view-line:not([data-rtl-dir="ltr"]), ${selfSel} .view-line:not([data-rtl-dir="ltr"]) { direction: rtl !important; unicode-bidi: plaintext !important; text-align: right !important; }`;
+
+    // LTR lines (English): explicit LTR + left-aligned.
+    // NO font override — keep Cairo consistent with Monaco's internal metrics.
+    // If we override to a different font here, Monaco's cursor `left` values
+    // become inaccurate (Monaco measured in Cairo, browser renders in other font).
+    css += `${parentSel} .view-line[data-rtl-dir="ltr"], ${selfSel} .view-line[data-rtl-dir="ltr"] { direction: ltr !important; unicode-bidi: normal !important; text-align: left !important; }`;
 
     // Inputarea: direction + font
     css += `${parentSel} .native-edit-context, ${selfSel} .native-edit-context { font-family: ${ff} !important; font-size: ${fs} !important; line-height: ${lh} !important; direction: rtl !important; unicode-bidi: plaintext !important; }`;
     css += `${parentSel} .inputarea, ${selfSel} .inputarea { font-family: ${ff} !important; font-size: ${fs} !important; line-height: ${lh} !important; direction: rtl !important; unicode-bidi: plaintext !important; }`;
 
-    // Ghost cursor: hide Monaco's native cursor when ghost is active
-    css += `${parentSel}.${CSS_CLASS.GHOST_ATTACHED} .cursors-layer .cursor, ${selfSel}.${CSS_CLASS.GHOST_ATTACHED} .cursors-layer .cursor { opacity: 0 !important; }`;
-    css += `.${v2}.${CSS_CLASS.GHOST_ATTACHED} .cursors-layer .cursor { opacity: 0 !important; }`;
+    // Ghost cursor: ALWAYS hide Monaco's native cursor in RTL editors.
+    // Ghost cursor handles ALL lines (RTL mirrored + LTR direct).
+    // Using permanent CSS rule (not class-toggled) eliminates the double-cursor flicker.
+    css += `${parentSel} .cursors-layer .cursor, ${selfSel} .cursors-layer .cursor { opacity: 0 !important; }`;
     css += `#${ELEMENT_ID.GHOST_CURSOR} { position: fixed; width: 2px; background-color: var(--vscode-editorCursor-foreground, #007acc); pointer-events: none; z-index: 100000; display: none; }`;
     css += `@keyframes copilot-rtl-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }`;
     css += `#${ELEMENT_ID.GHOST_CURSOR}.blink { animation: copilot-rtl-blink 1s step-end infinite; }`;

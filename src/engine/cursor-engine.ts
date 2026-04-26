@@ -1,27 +1,21 @@
 /**
- * RTL Engine — Cursor Engine (Layer 4)
- * Pixel-perfect cursor positioning for RTL text in Monaco editors.
+ * RTL Engine — Cursor Engine (Layer 4) v3
  *
- * Architecture (proven through versions 0.1.10→0.2.0):
- * - Click mapping: getTargetAtClientPoint() — let Monaco be the truth
- * - Visual cursor: DOM Range API on actual .view-line — let browser be the truth
- * - NEVER: Canvas measureText per-char sums, string heuristics, bidi-override clones
+ * Hybrid approach:
+ * - RTL lines: Monaco getScrolledVisiblePosition() works correctly ✓
+ * - LTR lines: Monaco returns editorW for all positions (bug in RTL container),
+ *   so we use DOM Range API on the actual view-line element instead.
  */
 
 import { CSS_CLASS, ELEMENT_ID } from './constants';
-import { getCaretCoordinatesFromTextNode, isMainCodeEditor } from './utils';
-import { getMonacoLib, findEditorForDom, getNonCodeEditors } from './monaco-bridge';
+import { isMainCodeEditor, getCaretCoordinatesFromTextNode } from './utils';
+import { findEditorForDom, getNonCodeEditors } from './monaco-bridge';
 
 let _ghostCursor: HTMLElement | null = null;
 const _attachedEditors = new WeakSet<any>();
-const _observedCursorLayers = new WeakSet<Element>();
-let _cursorObserver: MutationObserver | null = null;
 let _pointerdownAttached = false;
 
-export interface CursorConfig {
-    fontSize: string;
-    lineHeight: string;
-}
+export interface CursorConfig { fontSize: string; lineHeight: string; }
 
 // ── Ghost Cursor Element ──────────────────────────────────────────────
 
@@ -31,7 +25,6 @@ function getOrCreateGhostCursor(): HTMLElement {
         if (!_ghostCursor) {
             _ghostCursor = document.createElement('div');
             _ghostCursor.id = ELEMENT_ID.GHOST_CURSOR;
-            _ghostCursor.className = 'blink';
             document.body.appendChild(_ghostCursor);
             _ghostCursor.style.display = 'none';
         }
@@ -43,265 +36,171 @@ export function hideGhostCursor(): void {
     if (_ghostCursor) _ghostCursor.style.display = 'none';
 }
 
-// ── DOM-based Ghost Cursor Positioning ────────────────────────────────
-// Uses the ACTUAL rendered DOM to find cursor visual position.
-// This is the ground truth — respects ligatures, kerning, bidi reorder.
-// Clone preserves the original direction/bidi/shaping — NO bidi-override.
+function showGhostCursor(monacoEditor: Element, left: number, top: number, height: number): void {
+    const gc = getOrCreateGhostCursor();
+    gc.style.display = 'block';
+    gc.style.left   = left   + 'px';
+    gc.style.top    = top    + 'px';
+    gc.style.height = height + 'px';
+    gc.classList.remove('blink');
+    void gc.offsetWidth;
+    gc.classList.add('blink');
+    if (!monacoEditor.classList.contains(CSS_CLASS.GHOST_ATTACHED)) {
+        monacoEditor.classList.add(CSS_CLASS.GHOST_ATTACHED);
+    }
+}
 
-function findOffsetFromMonacoLeft(realLineElement: Element, monacoLeft: number): number {
-    const walker = document.createTreeWalker(realLineElement, NodeFilter.SHOW_TEXT, null);
-    let totalLength = 0;
+// ── LTR fallback: DOM Range on actual view-line ────────────────────────
+// Monaco's getScrolledVisiblePosition returns editorWidth for all LTR
+// columns in an RTL container — it's broken for LTR in RTL context.
+// DOM Range gives us the actual rendered glyph position.
+
+function getLtrCursorFromDom(
+    viewLineEl: HTMLElement,
+    column: number,   // 1-based Monaco column
+    monacoEditor: Element,
+    config: CursorConfig
+): void {
+    // Build text-node offset from logical column
+    const walker = document.createTreeWalker(viewLineEl, NodeFilter.SHOW_TEXT, null);
+    let remaining = column - 1; // column is 1-based
+    let node: Text | null = null;
+    let offset = 0;
+
     while (walker.nextNode()) {
-        totalLength += (walker.currentNode as Text).nodeValue!.length;
+        const t = walker.currentNode as Text;
+        const len = t.nodeValue!.length;
+        if (remaining <= len) { node = t; offset = remaining; break; }
+        remaining -= len;
     }
-    if (totalLength === 0) return 0;
+    if (!node) return;
 
-    // Clone the line — keep original direction/bidi so shaping is preserved
-    const clone = realLineElement.cloneNode(true) as HTMLElement;
-    clone.style.cssText = 'position: absolute; visibility: hidden; top: 0; left: 0; width: max-content; white-space: pre;';
-    realLineElement.parentNode!.appendChild(clone);
-
-    const cloneRect = clone.getBoundingClientRect();
-    let bestOffset = 0;
-    let minDiff = Infinity;
     const range = document.createRange();
+    range.setStart(node, offset);
+    range.setEnd(node, offset);
+    const rect = range.getBoundingClientRect();
+    if (!rect.width && !rect.height) return; // degenerate range
 
-    // Binary search for performance on longer lines
-    const cloneWalker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT, null);
-    let cNode: Text | null;
-    let currentOffset = 0;
-    const nodeInfos: Array<{ node: Text; startOffset: number; len: number }> = [];
-
-    while ((cNode = cloneWalker.nextNode() as Text | null)) {
-        const len = cNode.nodeValue!.length;
-        nodeInfos.push({ node: cNode, startOffset: currentOffset, len });
-        currentOffset += len;
-    }
-
-    for (const info of nodeInfos) {
-        // Binary search within this text node
-        let lo = 0, hi = info.len;
-        while (lo <= hi) {
-            const mid = (lo + hi) >>> 1;
-            try {
-                range.setStart(info.node, mid);
-                range.setEnd(info.node, mid);
-                const r = range.getBoundingClientRect();
-                const relativeLeft = r.left - cloneRect.left;
-                const diff = Math.abs(relativeLeft - monacoLeft);
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    bestOffset = info.startOffset + mid;
-                }
-                if (relativeLeft < monacoLeft) lo = mid + 1;
-                else hi = mid - 1;
-            } catch { break; }
-        }
-        // Also check neighborhood around best for sub-pixel precision
-        const localBest = bestOffset - info.startOffset;
-        for (let j = Math.max(0, localBest - 2); j <= Math.min(info.len, localBest + 2); j++) {
-            try {
-                range.setStart(info.node, j);
-                range.setEnd(info.node, j);
-                const r = range.getBoundingClientRect();
-                const relativeLeft = r.left - cloneRect.left;
-                const diff = Math.abs(relativeLeft - monacoLeft);
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    bestOffset = info.startOffset + j;
-                }
-            } catch {}
-        }
-    }
-
-    clone.remove();
-    return bestOffset;
+    const height = parseFloat(config.fontSize) * parseFloat(config.lineHeight) || 20;
+    showGhostCursor(monacoEditor, rect.left, rect.top, height);
 }
 
-function updateGhostCursorFromDOM(cursorElement: Element, config: CursorConfig): void {
-    const monacoEditor = cursorElement.closest('.monaco-editor');
-    if (!monacoEditor || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) {
-        return hideGhostCursor();
-    }
+// ── Main ghost cursor update ──────────────────────────────────────────
 
-    const linesContent = monacoEditor.querySelector('.lines-content');
-    if (!linesContent) return hideGhostCursor();
-
-    // Read cursor position from its style (set by Monaco internally)
-    const topStr = (cursorElement as HTMLElement).style.top;
-    const leftStr = (cursorElement as HTMLElement).style.left;
-
-    // Also check transform (newer VS Code versions use translate3d)
-    let monacoTop = 0, monacoLeft = 0;
-    const transform = (cursorElement as HTMLElement).style.transform;
-    if (transform && transform.indexOf('translate3d') !== -1) {
-        const match = transform.match(/translate3d\(([^,]+),\s*([^,]+)/);
-        if (match) {
-            monacoLeft = parseFloat(match[1]);
-            monacoTop = parseFloat(match[2]);
+function updateGhostFromEditorApi(
+    editorInstance: any,
+    monacoEditor: Element,
+    config: CursorConfig
+): void {
+    try {
+        if (!monacoEditor.isConnected || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) {
+            hideGhostCursor(); return;
         }
-    } else {
-        if (!topStr && !leftStr) return;
-        monacoTop = parseFloat(topStr || '0');
-        monacoLeft = parseFloat(leftStr || '0');
-    }
 
-    // Find the view-line at this vertical position
-    const viewLines = linesContent.querySelectorAll('.view-line');
-    let targetLineElement: Element | null = null;
-    for (let i = 0; i < viewLines.length; i++) {
-        const vl = viewLines[i] as HTMLElement;
-        let vlTop = parseFloat(vl.style.top || '0');
-        // Some versions use transform on view-lines too
-        const vlTransform = vl.style.transform;
-        if (vlTransform && vlTransform.indexOf('translate') !== -1) {
-            const m = vlTransform.match(/translate[3d]*\([^,]*,\s*([^,)]+)/);
-            if (m) vlTop = parseFloat(m[1]);
-        }
-        if (Math.abs(vlTop - monacoTop) < 2) {
-            targetLineElement = vl;
-            break;
-        }
-    }
+        const pos = editorInstance.getPosition?.();
+        if (!pos) { hideGhostCursor(); return; }
 
-    // ROOT FIX: Only use ghost cursor on RTL lines.
-    // LTR lines use Monaco's native cursor (which works perfectly for LTR).
-    if (targetLineElement) {
-        const lineDir = targetLineElement.getAttribute('data-rtl-dir');
-        if (lineDir !== 'rtl') {
-            // This is an LTR line — let Monaco's native cursor handle it
-            hideGhostCursor();
-            monacoEditor.classList.remove(CSS_CLASS.GHOST_ATTACHED);
+        const visualPos = editorInstance.getScrolledVisiblePosition?.(pos);
+        if (!visualPos || visualPos.top < 0) { hideGhostCursor(); return; }
+
+        const editorRect = (monacoEditor as HTMLElement).getBoundingClientRect();
+        const ghostH = visualPos.height
+            || parseFloat(config.fontSize) * parseFloat(config.lineHeight) || 20;
+
+        // Find the view-line for this visual top offset (to detect LTR vs RTL)
+        const viewLines = monacoEditor.querySelectorAll('.view-line');
+        let lineEl: HTMLElement | null = null;
+        for (let i = 0; i < viewLines.length; i++) {
+            const vl = viewLines[i] as HTMLElement;
+            const vlTop = vl.getBoundingClientRect().top - editorRect.top;
+            if (Math.abs(vlTop - visualPos.top) < 3) { lineEl = vl; break; }
+        }
+
+        // Determine if this line is LTR
+        const isLtr = lineEl?.getAttribute('data-rtl-dir') === 'ltr'
+            // fallback: if visualLeft == editorW, Monaco is reporting LTR-broken value
+            || visualPos.left >= editorRect.width - 2;
+
+        if (isLtr) {
+            // ── LTR strategy: read Monaco's OWN cursor element ─────────────
+            // Monaco computes .cursors-layer .cursor style.left CORRECTLY for LTR.
+            // Even with opacity:0, getBoundingClientRect() returns visual position.
+            // getScrolledVisiblePosition is broken for LTR in RTL containers.
+            const monacoNativeCursor = monacoEditor.querySelector(
+                '.cursors-layer .cursor'
+            ) as HTMLElement | null;
+            if (monacoNativeCursor) {
+                const cr = monacoNativeCursor.getBoundingClientRect();
+                if (cr.width > 0 || cr.height > 0) {
+                    showGhostCursor(monacoEditor, cr.left, cr.top, cr.height || ghostH);
+                    return;
+                }
+            }
+            // fallback: show ghost at editorRect.left (beginning of LTR line)
+            showGhostCursor(monacoEditor, editorRect.left, editorRect.top + visualPos.top, ghostH);
             return;
         }
 
-        const targetOffset = findOffsetFromMonacoLeft(targetLineElement, monacoLeft);
-        const rect = getCaretCoordinatesFromTextNode(targetLineElement, targetOffset);
-
-        if (rect) {
-            const gc = getOrCreateGhostCursor();
-            gc.style.display = 'block';
-            gc.style.left = rect.left + 'px';
-            gc.style.top = rect.top + 'px';
-            gc.style.height = (rect.height || parseFloat(config.fontSize) * parseFloat(config.lineHeight) || 20) + 'px';
-
-            // Restart blink animation
-            gc.classList.remove('blink');
-            void gc.offsetWidth;
-            gc.classList.add('blink');
-
-            if (!monacoEditor.classList.contains(CSS_CLASS.GHOST_ATTACHED)) {
-                monacoEditor.classList.add(CSS_CLASS.GHOST_ATTACHED);
-            }
-            return;
-        }
-    }
-    hideGhostCursor();
-}
-
-// ── Cursor Layer Observation ──────────────────────────────────────────
-
-export function observeCursorLayers(config: CursorConfig): void {
-    if (!_cursorObserver) {
-        _cursorObserver = new MutationObserver((mutations) => {
-            for (const m of mutations) {
-                const target = m.target as HTMLElement;
-                if (!target.classList) continue;
-
-                if (target.classList.contains('cursor')) {
-                    if (target.style.display === 'none' || target.style.visibility === 'hidden') {
-                        hideGhostCursor();
-                    } else {
-                        updateGhostCursorFromDOM(target, config);
-                    }
-                } else if (target.classList.contains('cursors-layer')) {
-                    const cursors = target.querySelectorAll('.cursor');
-                    if (cursors.length === 0) hideGhostCursor();
-                    else updateGhostCursorFromDOM(cursors[0], config);
-                }
-            }
-        });
-    }
-
-    const layers = document.querySelectorAll('.cursors-layer');
-    for (let i = 0; i < layers.length; i++) {
-        if (!_observedCursorLayers.has(layers[i])) {
-            _observedCursorLayers.add(layers[i]);
-            _cursorObserver.observe(layers[i], {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['style'],
-            });
-        }
+        // RTL: Monaco's visualLeft is correct (verified from debug data)
+        showGhostCursor(
+            monacoEditor,
+            editorRect.left + visualPos.left,
+            editorRect.top  + visualPos.top,
+            ghostH
+        );
+    } catch {
+        hideGhostCursor();
     }
 }
 
-// ── Click-to-Position Interception ────────────────────────────────────
-// Intercepts pointerdown on RTL Monaco editors, uses getTargetAtClientPoint
-// to correctly map click coordinates → logical position.
-// Monaco is the source of truth — no pixel math, no DOM offset tricks.
+// ── Cursor Layers (no-op — driven by onDidChangeCursorPosition) ───────
+export function observeCursorLayers(_config: CursorConfig): void {}
 
+// ── Click Interceptor ─────────────────────────────────────────────────
 export function attachClickInterceptor(): void {
     if (_pointerdownAttached) return;
     _pointerdownAttached = true;
-
     document.addEventListener('pointerdown', (e: PointerEvent) => {
         const target = e.target as Element;
-        if (!target?.closest) return;
-
-        const monacoEditor = target.closest('.monaco-editor');
+        const monacoEditor = target?.closest?.('.monaco-editor');
         if (!monacoEditor || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) return;
         if (isMainCodeEditor(monacoEditor)) return;
-
-        // Find the editor instance for this DOM element
         const editorRecords = getNonCodeEditors();
         const editorInstance = findEditorForDom(monacoEditor, editorRecords);
         if (!editorInstance) return;
-
-        // Only intercept clicks on the text area, not buttons/widgets
         const viewLines = monacoEditor.querySelector('.view-lines');
-        if (!viewLines || !viewLines.contains(target)) return;
-
-        // Use Monaco's own hit-testing — this is the ONLY correct way
+        if (!viewLines?.contains(target)) return;
         if (typeof editorInstance.getTargetAtClientPoint === 'function') {
-            const hitTarget = editorInstance.getTargetAtClientPoint(e.clientX, e.clientY);
-            if (hitTarget && hitTarget.position) {
-                e.preventDefault();
-                e.stopPropagation();
-                setTimeout(() => {
-                    editorInstance.setPosition(hitTarget.position);
-                    editorInstance.focus();
-                }, 0);
+            const hit = editorInstance.getTargetAtClientPoint(e.clientX, e.clientY);
+            if (hit?.position) {
+                e.preventDefault(); e.stopPropagation();
+                setTimeout(() => { editorInstance.setPosition(hit.position); editorInstance.focus(); }, 0);
             }
         }
     }, true);
 }
 
 // ── Editor Lifecycle ──────────────────────────────────────────────────
-
-export function attachClickHandler(editorInstance: any): void {
+export function attachClickHandler(editorInstance: any, config?: CursorConfig): void {
     if (!editorInstance || _attachedEditors.has(editorInstance)) return;
     _attachedEditors.add(editorInstance);
-
     try {
-        // Hide ghost cursor on blur
+        const domNode = editorInstance.getDomNode?.() as HTMLElement | null;
+        const monacoEditor = domNode?.closest('.monaco-editor') ?? domNode;
+        if (!monacoEditor) return;
+        const cfg = config ?? { fontSize: '14', lineHeight: '1.8' };
+        editorInstance.onDidChangeCursorPosition?.(() =>
+            updateGhostFromEditorApi(editorInstance, monacoEditor, cfg));
+        editorInstance.onDidFocusEditorText?.(() => {
+            if (monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL))
+                updateGhostFromEditorApi(editorInstance, monacoEditor, cfg);
+        });
         editorInstance.onDidBlurEditorText?.(() => hideGhostCursor());
     } catch {}
-
-    // Ensure global click interceptor is attached
     attachClickInterceptor();
 }
 
-// ── Cleanup ───────────────────────────────────────────────────────────
-
 export function destroyCursorEngine(): void {
-    if (_ghostCursor?.parentNode) {
-        _ghostCursor.parentNode.removeChild(_ghostCursor);
-        _ghostCursor = null;
-    }
-    if (_cursorObserver) {
-        _cursorObserver.disconnect();
-        _cursorObserver = null;
-    }
+    _ghostCursor?.parentNode?.removeChild(_ghostCursor);
+    _ghostCursor = null;
 }

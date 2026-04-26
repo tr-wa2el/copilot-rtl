@@ -258,6 +258,122 @@ function escapeForRegex(str: string): string {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Monaco bundle patch — exposes CodeEditorService on window.__rtlEditorService
+// ─────────────────────────────────────────────────────────────────────────────
+const MONACO_PATCH_OLD = 'addCodeEditor(e){this._codeEditors[e.getId()]=e,this._onCodeEditorAdd.fire(e)}';
+const MONACO_PATCH_NEW = 'addCodeEditor(e){this._codeEditors[e.getId()]=e,this._onCodeEditorAdd.fire(e);if(typeof window!=="undefined")window.__rtlEditorService=this}';
+
+/**
+ * Patch workbench.desktop.main.js to expose Monaco's CodeEditorService.
+ * This lets our engine call listCodeEditors() / updateOptions() without
+ * needing window.require (which VS Code nullifies for security).
+ * Idempotent — safe to call multiple times.
+ */
+async function patchMonacoBundle(htmlPath: string): Promise<{ patched: boolean; error?: string }> {
+    // Find workbench.desktop.main.js next to the HTML
+    const htmlDir = path.dirname(htmlPath);
+    const candidates = [
+        path.join(htmlDir, 'workbench.desktop.main.js'),
+        path.join(path.dirname(htmlDir), 'workbench', 'workbench.desktop.main.js'),
+        // Also look in the workbench sibling dir (vs/workbench/)
+        path.join(htmlDir, '..', '..', '..', 'workbench', 'workbench.desktop.main.js'),
+    ];
+    const jsPath = firstExistingPath(candidates);
+    if (!jsPath) { return { patched: false, error: 'workbench.desktop.main.js not found' }; }
+
+    try {
+        let content = await fsp.readFile(jsPath, 'utf8');
+        if (content.includes(MONACO_PATCH_NEW)) {
+            return { patched: true }; // already patched
+        }
+        if (!content.includes(MONACO_PATCH_OLD)) {
+            return { patched: false, error: 'Monaco bundle: target addCodeEditor pattern not found (VS Code version may have changed)' };
+        }
+        // Backup on first patch
+        const bakPath = jsPath + '.bak-copilot-rtl';
+        if (!fs.existsSync(bakPath)) {
+            await fsp.writeFile(bakPath, content, 'utf8');
+        }
+        content = content.replace(MONACO_PATCH_OLD, MONACO_PATCH_NEW);
+        await fsp.writeFile(jsPath, content, 'utf8');
+        return { patched: true };
+    } catch (e: unknown) {
+        return { patched: false, error: e instanceof Error ? e.message : String(e) };
+    }
+}
+
+/** Revert the Monaco bundle patch. */
+async function unpatchMonacoBundle(htmlPath: string): Promise<void> {
+    const htmlDir = path.dirname(htmlPath);
+    const candidates = [
+        path.join(htmlDir, 'workbench.desktop.main.js'),
+        path.join(path.dirname(htmlDir), 'workbench', 'workbench.desktop.main.js'),
+        path.join(htmlDir, '..', '..', '..', 'workbench', 'workbench.desktop.main.js'),
+    ];
+    const jsPath = firstExistingPath(candidates);
+    if (!jsPath) { return; }
+    try {
+        let content = await fsp.readFile(jsPath, 'utf8');
+        if (content.includes(MONACO_PATCH_NEW)) {
+            content = content.replace(MONACO_PATCH_NEW, MONACO_PATCH_OLD);
+            await fsp.writeFile(jsPath, content, 'utf8');
+        }
+    } catch { /* ignore */ }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// workbench.html CSP patch — allows Google Fonts (Cairo, Tajawal, etc.)
+// ─────────────────────────────────────────────────────────────────────────────
+const CSP_FONT_OLD    = `https://*.vscode-unpkg.net`;
+const CSP_FONT_NEW    = `https://*.vscode-unpkg.net\n\t\t\t\t\thttps://fonts.gstatic.com`;
+const CSP_STYLE_OLD   = `'unsafe-inline'`;
+const CSP_STYLE_NEW   = `'unsafe-inline'\n\t\t\t\t\thttps://fonts.googleapis.com`;
+
+/** Allow Google Fonts in the workbench CSP (font-src + style-src). Idempotent. */
+async function patchWorkbenchCsp(htmlPath: string): Promise<void> {
+    try {
+        let content = await fsp.readFile(htmlPath, 'utf8');
+        let changed = false;
+
+        if (!content.includes('fonts.gstatic.com')) {
+            const idx = content.indexOf(CSP_FONT_OLD);
+            if (idx >= 0) {
+                // Replace first occurrence (inside font-src block)
+                content = content.substring(0, idx + CSP_FONT_OLD.length)
+                    + '\n\t\t\t\t\thttps://fonts.gstatic.com'
+                    + content.substring(idx + CSP_FONT_OLD.length);
+                changed = true;
+            }
+        }
+
+        if (!content.includes('fonts.googleapis.com')) {
+            // Insert after 'unsafe-inline' in style-src only (first occurrence)
+            const styleIdx = content.indexOf(CSP_STYLE_OLD);
+            if (styleIdx >= 0) {
+                content = content.substring(0, styleIdx + CSP_STYLE_OLD.length)
+                    + '\n\t\t\t\t\thttps://fonts.googleapis.com'
+                    + content.substring(styleIdx + CSP_STYLE_OLD.length);
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            await fsp.writeFile(htmlPath, content, 'utf8');
+        }
+    } catch { /* ignore — CSP patch is a best-effort enhancement */ }
+}
+
+/** Revert the CSP patch. */
+async function unpatchWorkbenchCsp(htmlPath: string): Promise<void> {
+    try {
+        let content = await fsp.readFile(htmlPath, 'utf8');
+        content = content.replace(/\r?\n\t\t\t\t\thttps:\/\/fonts\.gstatic\.com/g, '');
+        content = content.replace(/\r?\n\t\t\t\t\thttps:\/\/fonts\.googleapis\.com/g, '');
+        await fsp.writeFile(htmlPath, content, 'utf8');
+    } catch { /* ignore */ }
+}
+
 function getSettings(): { fontFamily: string; fontSize: number; lineHeight: number; ltrFontFamily: string; ltrFontSize: number; ltrLineHeight: number; autoInputDirection: boolean; textAlign: string } {
     const cfg = vscode.workspace.getConfiguration('copilotRtl');
     return {
@@ -316,6 +432,14 @@ async function enablePatch(htmlPath: string, fontFamily: string, fontSize: numbe
         }
 
         await fsp.writeFile(htmlPath, content, 'utf8');
+
+        // Patch Monaco bundle (expose __rtlEditorService) and CSP (Google Fonts)
+        const monacoResult = await patchMonacoBundle(htmlPath);
+        if (!monacoResult.patched && monacoResult.error) {
+            // Non-fatal: log warning but don't fail the enable
+            console.warn(`[Copilot RTL] Monaco bundle patch skipped: ${monacoResult.error}`);
+        }
+        await patchWorkbenchCsp(htmlPath);
 
         // Also patch the Antigravity agent panel if it exists
         await enableAgentPatch(fontFamily, fontSize, lineHeight, ltrFontFamily, ltrFontSize, ltrLineHeight, textAlign);
@@ -384,6 +508,10 @@ async function disablePatch(htmlPath: string): Promise<{ success: boolean; error
             content = content.replace(regex, '');
             await fsp.writeFile(htmlPath, content, 'utf8');
         }
+
+        // Revert Monaco bundle patch and CSP patch
+        await unpatchMonacoBundle(htmlPath);
+        await unpatchWorkbenchCsp(htmlPath);
 
         // Remove the JS file if it exists
         const jsPath = path.join(path.dirname(htmlPath), PATCH_JS_NAME);
