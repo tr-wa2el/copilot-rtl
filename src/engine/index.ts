@@ -1,10 +1,7 @@
 /**
- * RTL Engine — Lifecycle Manager (Layer 8) — ROOT FIX
+ * RTL Engine — Lifecycle Manager (Layer 8)
  * 
- * Key changes from previous version:
- * - processNonCodeMonacos no longer takes fontConfig (font is CSS-only)
- * - setupInputListeners no longer takes fontConfig
- * - Per-line direction is handled by direction-manager, not CSS
+ * Per-line direction + updateOptions font metrics for word wrap.
  */
 
 import { debounce } from './utils';
@@ -14,8 +11,8 @@ import {
     scanAllMarkdown, scanResponseContainers, scanLexicalInputs,
     type RenderConfig,
 } from './rendering-patcher';
-import { processNonCodeMonacos, setupInputListeners } from './direction-manager';
-import { restoreAllFonts } from './font-metrics';
+import { processNonCodeMonacos, setupInputListeners, clearStickyState } from './direction-manager';
+import { restoreAllFonts, forceRemeasureAll } from './font-metrics';
 import { destroyCursorEngine, hideGhostCursor } from './cursor-engine';
 import { observeSelectionLayers, destroySelectionEngine } from './selection-engine';
 import { attachKeyboardInterceptor, fixInputAreaDirection, preventDirectionToggle } from './input-interceptor';
@@ -58,6 +55,14 @@ const renderConfig: RenderConfig = {
     ltrFontFamily: LTR_FONT_FAMILY,
     ltrFontSize: LTR_FONT_SIZE > 0 ? LTR_FONT_SIZE + 'px' : '',
     ltrLineHeight: LTR_LINE_HEIGHT > 0 ? String(LTR_LINE_HEIGHT) : '',
+};
+
+import type { FontConfig } from './font-metrics';
+
+const fontConfig: FontConfig = {
+    fontFamily: RTL_FONT_FAMILY,
+    fontSize: RTL_FONT_SIZE,
+    lineHeight: RTL_LINE_HEIGHT,
 };
 
 const cursorConfig: CursorConfig = {
@@ -133,7 +138,7 @@ function startObserver(): void {
 
     const debouncedScan = debounce(() => {
         scanAll();
-        processNonCodeMonacos(cursorConfig);
+        processNonCodeMonacos(fontConfig, cursorConfig);
         observeSelectionLayers();
     }, 150);
 
@@ -169,6 +174,7 @@ function shutdown(): void {
     if (_mainInterval) { clearInterval(_mainInterval); _mainInterval = null; }
     removeStyles();
     removeAllClasses();
+    clearStickyState();
     restoreAllFonts();
     destroyCursorEngine();
     destroySelectionEngine();
@@ -189,12 +195,13 @@ function reinitialize(): void {
     if (_mainInterval) clearInterval(_mainInterval);
     _mainInterval = setInterval(() => {
         scanAll();
-        processNonCodeMonacos(cursorConfig);
+        processNonCodeMonacos(fontConfig, cursorConfig);
         scanLexicalInputs(renderConfig);
         observeSelectionLayers();
+        forceRemeasureAll(); // re-sync charWidth after Monaco DOM re-renders
     }, 3000);
     scanAll();
-    processNonCodeMonacos(cursorConfig);
+    processNonCodeMonacos(fontConfig, cursorConfig);
     scanLexicalInputs(renderConfig);
 }
 
@@ -213,6 +220,62 @@ function startStatePolling(): void {
     }, 1500);
 }
 
+// ── DEBUG: Flicker spy ────────────────────────────────────────────────
+// Watches Monaco editors for ANY style/class/attribute change and logs
+// the source. Check DevTools console for [FLICKER-SPY] entries.
+
+function startFlickerSpy(): void {
+    const spy = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            const el = m.target as HTMLElement;
+            if (!el.closest || !el.closest('.monaco-editor')) continue;
+
+            // Watch for class changes on monaco-editor (EDITOR_RTL toggle)
+            if (m.type === 'attributes' && m.attributeName === 'class') {
+                const classes = el.classList.toString();
+                if (el.classList.contains('monaco-editor') || el.classList.contains('view-line')) {
+                    console.log(`[FLICKER-SPY] class changed on <${el.tagName}.${el.className.split(' ').slice(0, 3).join('.')}> → "${classes.substring(0, 100)}"`, new Error().stack?.split('\n').slice(1, 4).join(' | '));
+                }
+            }
+
+            // Watch for style changes (font-family, font-size, direction)
+            if (m.type === 'attributes' && m.attributeName === 'style') {
+                const tag = el.tagName.toLowerCase();
+                const style = el.style;
+                if (tag === 'div' && (el.classList.contains('view-line') || el.classList.contains('view-lines') || el.classList.contains('lines-content'))) {
+                    const ff = style.fontFamily;
+                    const fs = style.fontSize;
+                    const dir = style.direction;
+                    if (ff || fs || dir) {
+                        console.log(`[FLICKER-SPY] style on <${tag}.${el.className.split(' ')[0]}> → font:${ff || '-'} size:${fs || '-'} dir:${dir || '-'}`);
+                    }
+                }
+            }
+
+            // Watch for child additions (Monaco recreating view-lines)
+            if (m.type === 'childList' && m.addedNodes.length > 0) {
+                for (let i = 0; i < m.addedNodes.length; i++) {
+                    const node = m.addedNodes[i] as HTMLElement;
+                    if (node.nodeType === 1 && node.classList?.contains('view-line')) {
+                        console.log(`[FLICKER-SPY] NEW view-line added (Monaco re-render)`, node.textContent?.substring(0, 50));
+                    }
+                }
+            }
+        }
+    });
+
+    // Start observing after a delay to skip initial render
+    setTimeout(() => {
+        spy.observe(document.body, {
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class', 'style'],
+            childList: true,
+        });
+        console.log('[FLICKER-SPY] Active — watching for style/class changes on Monaco editors');
+    }, 3000);
+}
+
 // ── BOOT ──────────────────────────────────────────────────────────────
 
 function boot(): void {
@@ -225,26 +288,31 @@ function boot(): void {
     startObserver();
 
     setupLexicalInputListener();
-    setupInputListeners(cursorConfig);
+    setupInputListeners(fontConfig, cursorConfig);
     attachKeyboardInterceptor();
     preventDirectionToggle();
 
     onMonacoReady(() => {
-        processNonCodeMonacos(cursorConfig);
+        console.log('[RTL Engine] Monaco ready — initial scan');
+        processNonCodeMonacos(fontConfig, cursorConfig);
         observeSelectionLayers();
     });
 
     _mainInterval = setInterval(() => {
         scanAll();
-        processNonCodeMonacos(cursorConfig);
+        processNonCodeMonacos(fontConfig, cursorConfig);
         scanLexicalInputs(renderConfig);
         observeSelectionLayers();
+        forceRemeasureAll(); // re-sync charWidth after Monaco DOM re-renders
     }, 3000);
 
-    processNonCodeMonacos(cursorConfig);
+    processNonCodeMonacos(fontConfig, cursorConfig);
     scanLexicalInputs(renderConfig);
 
     startStatePolling();
+
+    // DEBUG: Start the flicker spy
+    startFlickerSpy();
 }
 
 // ── Entry Point ───────────────────────────────────────────────────────

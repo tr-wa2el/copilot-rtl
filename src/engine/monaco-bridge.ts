@@ -1,111 +1,66 @@
 /**
  * RTL Engine — Monaco Bridge
- * Discovers and caches the Monaco API from VS Code's runtime environment.
- * Uses 4 progressively aggressive methods to find the monaco global.
+ *
+ * Accesses Monaco editors via window.__rtlEditorService which is exposed
+ * by a direct patch to workbench.desktop.main.js:
+ *
+ *   addCodeEditor(e) {
+ *     this._codeEditors[e.getId()] = e;
+ *     this._onCodeEditorAdd.fire(e);
+ *     window.__rtlEditorService = this;  // ← OUR PATCH
+ *   }
+ *
+ * This gives us the real ICodeEditorService including EmbeddedCodeEditorWidget
+ * (Copilot Chat input) which is NOT accessible via window.require (= null).
  */
 
 import { isMainCodeEditor, getEditorDomNode } from './utils';
 
-let _cachedLib: any = null;
-let _asyncDiscoveryStarted = false;
-let _onDiscoveryCallbacks: Array<() => void> = [];
+let _cachedService: any = null;
 
-/**
- * Get the Monaco library object (`monaco.editor`).
- * Returns null if not yet available — call `onMonacoReady()` to be notified.
- */
+function getEditorService(): any | null {
+    if (_cachedService) return _cachedService;
+    const svc = (window as any).__rtlEditorService;
+    if (svc && typeof svc.listCodeEditors === 'function') {
+        _cachedService = svc;
+        console.log('[RTL Engine] ✓ __rtlEditorService found! editors:', svc.listCodeEditors().length);
+    }
+    return _cachedService;
+}
+
 export function getMonacoLib(): any {
-    if (_cachedLib) return _cachedLib;
-
-    // Method 1: global `monaco`
-    try {
-        if (typeof (window as any).monaco !== 'undefined' && (window as any).monaco?.editor) {
-            _cachedLib = (window as any).monaco;
-            return _cachedLib;
-        }
-    } catch {}
-
-    // Method 2: AMD requirejs module cache
-    try {
-        const ctx = (window as any).require?.s?.contexts?._;
-        const defined = ctx?.defined;
-        if (defined) {
-            for (const key of Object.keys(defined)) {
-                const mod = defined[key];
-                if (mod?.editor && typeof mod.editor.getEditors === 'function') {
-                    _cachedLib = mod;
-                    return _cachedLib;
-                }
-            }
-        }
-    } catch {}
-
-    // Method 3: sync require
-    try {
-        const req = (typeof require !== 'undefined' ? require : null) || (window as any).require;
-        if (req) {
-            const m = req('vs/editor/editor.main');
-            if (m?.editor) {
-                _cachedLib = m;
-                return _cachedLib;
-            }
-        }
-    } catch {}
-
-    // Method 4: async require (one-time setup)
-    if (!_asyncDiscoveryStarted) {
-        _asyncDiscoveryStarted = true;
-        try {
-            const asyncReq = (typeof require !== 'undefined' ? require : null) || (window as any).require;
-            if (asyncReq && typeof asyncReq === 'function') {
-                asyncReq(
-                    ['vs/editor/editor.main'],
-                    (m: any) => {
-                        if (m?.editor && typeof m.editor.getEditors === 'function') {
-                            _cachedLib = m;
-                            console.log('[RTL Engine] Monaco discovered via async require');
-                            _onDiscoveryCallbacks.forEach(cb => cb());
-                            _onDiscoveryCallbacks = [];
-                        }
-                    },
-                    () => {}
-                );
-            }
-        } catch {}
-    }
-
-    return null;
+    return null; // window.require = null in VS Code renderer; use getEditorService() instead
 }
 
-/** Register a callback to be called when Monaco is discovered (if not already). */
 export function onMonacoReady(callback: () => void): void {
-    if (_cachedLib) {
-        callback();
-    } else {
-        _onDiscoveryCallbacks.push(callback);
-        // Trigger discovery attempt
-        getMonacoLib();
-    }
+    // Poll until __rtlEditorService is set (by our workbench.desktop.main.js patch)
+    const check = () => {
+        if (getEditorService()) { callback(); }
+        else { setTimeout(check, 500); }
+    };
+    check();
 }
 
-/** Get all non-code Monaco editor instances (chat inputs, etc.) */
 export function getNonCodeEditors(): Array<{ instance: any; domNode: HTMLElement }> {
-    const lib = getMonacoLib();
-    if (!lib) return [];
     const results: Array<{ instance: any; domNode: HTMLElement }> = [];
+    const svc = getEditorService();
+    if (!svc) return results;
+
     try {
-        const editors = lib.editor.getEditors();
-        for (const editor of editors) {
-            const dn = getEditorDomNode(editor);
-            if (dn && !isMainCodeEditor(dn)) {
-                results.push({ instance: editor, domNode: dn });
-            }
+        const all: any[] = svc.listCodeEditors();
+        for (const editor of all) {
+            try {
+                const dn = getEditorDomNode(editor);
+                if (dn && !isMainCodeEditor(dn)) {
+                    results.push({ instance: editor, domNode: dn });
+                }
+            } catch {}
         }
     } catch {}
+
     return results;
 }
 
-/** Find the Monaco editor instance that owns a given DOM element. */
 export function findEditorForDom(
     monacoDom: Element,
     editorRecords: Array<{ instance: any; domNode: HTMLElement }>
@@ -116,4 +71,8 @@ export function findEditorForDom(
         if (rec.domNode.contains(monacoDom) || monacoDom.contains(rec.domNode)) return rec.instance;
     }
     return null;
+}
+
+export function invalidateDomEditorCache(_el: Element): void {
+    _cachedService = null; // force re-check on next call
 }

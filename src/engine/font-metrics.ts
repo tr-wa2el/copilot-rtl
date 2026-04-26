@@ -1,28 +1,15 @@
 /**
- * RTL Engine — Font Metrics Bridge (Layer 3) — ROOT FIX
- * 
- * CRITICAL CHANGE: NO LONGER changes Monaco's fontFamily via updateOptions().
- * 
- * Old approach (BROKEN):
- *   - updateOptions({ fontFamily: 'vazirmatn' }) → changes Monaco's internal
- *     character-width cache to Arabic font metrics → word wrap is calculated
- *     using Arabic widths for ALL text including English → WRONG
- *   
- * New approach (ROOT FIX):
- *   - Font is applied via CSS only (per-line, see rendering-patcher)
- *   - Monaco's internal metrics stay with the default monospace font
- *   - Only wrapping strategy and word wrap mode are set via updateOptions()
- *   - This means English text has perfect word wrap
- *   - Arabic word wrap won't be pixel-perfect but won't overflow
+ * RTL Engine — Font Metrics (Layer 3)
+ *
+ * Now that we have real Monaco editor instances via window.__rtlEditorService,
+ * we can call updateOptions() with the correct Arabic font so Monaco's
+ * DOMLineBreaksComputer measures character widths correctly.
+ *
+ * ROOT CAUSE OF WRONG WORD WRAP:
+ * Monaco measures char widths using editor.options.fontFamily (Consolas ~7.8px/char)
+ * but CSS renders using Vazirmatn (~10-12px/char). Monaco thinks the text fits,
+ * so it doesn't wrap. Fix: tell Monaco the real font via updateOptions({ fontFamily }).
  */
-
-import { getMonacoLib } from './monaco-bridge';
-
-/** Stored original options per editor instance. */
-const _originals = new WeakMap<any, Record<string, any>>();
-
-/** Track which editors have been configured. */
-const _configured = new WeakSet<any>();
 
 export interface FontConfig {
     fontFamily: string;
@@ -30,65 +17,56 @@ export interface FontConfig {
     lineHeight: number;
 }
 
+// Track applied editors — use editor ID (string) not WeakSet to allow re-apply on font change
+const _configuredIds = new Set<string>();
+
 /**
- * Configure Monaco editor for mixed RTL/LTR content.
- * Only sets wrapping options — does NOT change fontFamily or fontSize.
- * Font is applied via CSS per-line.
+ * Apply RTL font + word wrap options to a Monaco editor instance.
+ * Called whenever a non-code editor is detected; protected by ID set.
  */
-export function configureForRtl(editorInstance: any): void {
-    if (!editorInstance || _configured.has(editorInstance)) return;
-    _configured.add(editorInstance);
+export function applyRtlFont(editorInstance: any, config: FontConfig): void {
+    if (!editorInstance) return;
+
+    const editorId: string = editorInstance.getId?.() ?? '';
+    if (editorId && _configuredIds.has(editorId)) return;
+    if (editorId) _configuredIds.add(editorId);
 
     try {
-        // Save originals for restoration
-        if (!_originals.has(editorInstance)) {
-            const raw = editorInstance.getRawOptions?.() ?? {};
-            _originals.set(editorInstance, {
-                wordWrap: raw.wordWrap,
-                wrappingStrategy: raw.wrappingStrategy,
-            });
-        }
-
-        // Only set wrapping — font is CSS-only
         editorInstance.updateOptions({
             wordWrap: 'on',
             wrappingStrategy: 'advanced',
+            fontFamily: config.fontFamily,   // ← Critical: Monaco measures wrap with THIS font
+            fontSize: config.fontSize,       //   DOMLineBreaksComputer uses options.fontFamily
+            lineHeight: config.lineHeight,   //   NOT CSS — so we must set it here
         });
-
-        scheduleLayout(editorInstance);
+        console.log('[RTL Engine] ✓ fontFamily + wordWrap:on applied to', editorId, '→', config.fontFamily);
     } catch (e) {
-        console.error('[RTL Engine] configureForRtl error:', e);
+        console.warn('[RTL Engine] updateOptions failed:', e);
+    }
+
+    // Trigger re-layout after web fonts load so DOMLineBreaksComputer re-measures
+    if (document.fonts?.ready) {
+        document.fonts.ready.then(() => {
+            try {
+                editorInstance.layout();
+                console.log('[RTL Engine] ✓ layout() called after fonts ready for', editorId);
+            } catch {}
+        });
     }
 }
 
-/** Restore original options on a Monaco editor instance. */
+/**
+ * Reset configuration for an editor (e.g. when it goes back to LTR).
+ */
 export function restoreFont(editorInstance: any): void {
-    if (!editorInstance) return;
-    try {
-        _configured.delete(editorInstance);
-        if (_originals.has(editorInstance)) {
-            editorInstance.updateOptions(_originals.get(editorInstance)!);
-            _originals.delete(editorInstance);
-        }
-    } catch {}
+    const editorId: string = editorInstance?.getId?.() ?? '';
+    if (editorId) _configuredIds.delete(editorId);
 }
 
-/** Restore all tracked non-code editor options. */
 export function restoreAllFonts(): void {
-    const lib = getMonacoLib();
-    if (!lib) return;
-    try {
-        for (const editor of lib.editor.getEditors()) {
-            restoreFont(editor);
-        }
-    } catch {}
+    _configuredIds.clear();
 }
 
-/** Schedule layout recalculation. */
-function scheduleLayout(editorInstance: any): void {
-    requestAnimationFrame(() => {
-        try {
-            editorInstance.layout();
-        } catch {}
-    });
+export function forceRemeasureAll(): void {
+    // No-op: done per-editor in applyRtlFont
 }
