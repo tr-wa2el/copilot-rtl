@@ -16,13 +16,6 @@ let _ghostCursor: HTMLElement | null = null;
 const _attachedEditors = new WeakSet<any>();
 let _pointerdownAttached = false;
 
-// ── Keyboard direction state (module-level) ───────────────────────────
-// Tracks the direction set by keyboard events (Alt+Shift / first keypress).
-// This state persists even when the ghost cursor element doesn't exist yet,
-// and takes PRIORITY over text-based detection for KBD_PRIORITY_MS ms.
-let _kbdIsLtr: boolean = true;       // default: LTR until keyboard detected
-let _kbdSetAt: number  = 0;          // timestamp of last keyboard-based set
-const KBD_PRIORITY_MS  = 2000;       // keyboard wins over text for 2 seconds
 
 export interface CursorConfig { fontSize: string; lineHeight: string; }
 
@@ -47,20 +40,13 @@ export function hideGhostCursor(): void {
 
 function showGhostCursor(
     monacoEditor: Element,
-    left: number, top: number, height: number,
-    textIsLtr: boolean = false   // direction from text detection
+    left: number, top: number, height: number
 ): void {
     const gc = getOrCreateGhostCursor();
     gc.style.display = 'block';
     gc.style.left   = left   + 'px';
     gc.style.top    = top    + 'px';
     gc.style.height = height + 'px';
-    // Keyboard direction takes priority for KBD_PRIORITY_MS after a layout switch.
-    // After that, text-based detection takes over.
-    const useKbd = (Date.now() - _kbdSetAt) < KBD_PRIORITY_MS;
-    const dirIsLtr = useKbd ? _kbdIsLtr : textIsLtr;
-    gc.classList.remove('dir-rtl', 'dir-ltr');
-    gc.classList.add(dirIsLtr ? 'dir-ltr' : 'dir-rtl');
     gc.classList.remove('blink');
     void gc.offsetWidth;
     gc.classList.add('blink');
@@ -77,8 +63,7 @@ function getLtrCursorFromDom(
     viewLineEl: HTMLElement,
     column: number,
     monacoEditor: Element,
-    config: CursorConfig,
-    isLtr: boolean = true
+    config: CursorConfig
 ): boolean {
     // Walk text nodes, sum character counts to reach Monaco column
     const walker = document.createTreeWalker(viewLineEl, NodeFilter.SHOW_TEXT, null);
@@ -115,7 +100,7 @@ function getLtrCursorFromDom(
         if (!rect.top && !rect.height && !rect.left) return false;
 
         const height = visualLineHeight(viewLineEl) || parseFloat(config.fontSize) * parseFloat(config.lineHeight) || 20;
-        showGhostCursor(monacoEditor, rect.left, rect.top, height, isLtr);
+        showGhostCursor(monacoEditor, rect.left, rect.top, height);
         return true;
     } catch {
         return false;
@@ -163,50 +148,20 @@ function updateGhostFromEditorApi(
         const isLtrLine = lineEl?.getAttribute('data-rtl-dir') === 'ltr'
             || visualPos.left >= editorRect.width - 2;
 
-        // ── CURSOR FLAG DIRECTION: last STRONG directional character ────
-        // Skip neutral chars (space, digits, punctuation) — search backwards
-        // from cursor position for the nearest Arabic or Latin LETTER.
-        const ARABIC_RE  = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
-        const LATIN_RE   = /[a-zA-Z]/;
-        let cursorIsLtr: boolean;
-        try {
-            const model = editorInstance.getModel?.();
-            const lineText: string = model?.getLineContent(pos.lineNumber) ?? '';
-            // Walk backwards from cursor to find last strong directional character
-            let strongChar = '';
-            for (let i = pos.column - 2; i >= 0; i--) {
-                const ch = lineText[i];
-                if (ARABIC_RE.test(ch) || LATIN_RE.test(ch)) { strongChar = ch; break; }
-            }
-            // If no strong char before, look forward
-            if (!strongChar) {
-                for (let i = pos.column - 1; i < lineText.length; i++) {
-                    const ch = lineText[i];
-                    if (ARABIC_RE.test(ch) || LATIN_RE.test(ch)) { strongChar = ch; break; }
-                }
-            }
-            cursorIsLtr = strongChar ? LATIN_RE.test(strongChar) : isLtrLine;
-        } catch {
-            cursorIsLtr = isLtrLine;
-        }
-
         if (isLtrLine) {
-            // LTR strategy: DOM Range on the actual rendered view-line
-            if (lineEl && getLtrCursorFromDom(lineEl, pos.column, monacoEditor, config, cursorIsLtr)) {
+            if (lineEl && getLtrCursorFromDom(lineEl, pos.column, monacoEditor, config)) {
                 return;
             }
-            // Fallback: place at editor left edge for this row
-            showGhostCursor(monacoEditor, editorRect.left, editorRect.top + visualPos.top, ghostH, cursorIsLtr);
+            showGhostCursor(monacoEditor, editorRect.left, editorRect.top + visualPos.top, ghostH);
             return;
         }
 
-        // RTL strategy: Monaco's getScrolledVisiblePosition is correct for RTL
+        // RTL strategy
         showGhostCursor(
             monacoEditor,
             editorRect.left + visualPos.left,
             editorRect.top  + visualPos.top,
-            ghostH,
-            cursorIsLtr  // ← character-level direction
+            ghostH
         );
     } catch {
         hideGhostCursor();
@@ -281,11 +236,7 @@ export function attachClickInterceptor(): void {
     _pointerdownAttached = true;
 
     // ── Initial cursor direction from system language ──────────────────
-    // Set the ghost cursor direction based on the OS/browser language
-    // so it's correct from the first moment (before any typing).
-    const systemIsRtl = /^ar|^he|^fa|^ur/.test(navigator.language ?? '');
-    // Will be applied when ghost cursor is first shown (see showGhostCursor)
-    // We store it for use in the keyboard detector below.
+    // (Removed — directional flag feature removed)
 
     document.addEventListener('pointerdown', (e: PointerEvent) => {
         const target = e.target as Element;
@@ -318,60 +269,8 @@ export function attachClickInterceptor(): void {
         }, 0);
     }, true);
 
-    // ── Keyboard Language Detector ─────────────────────────────────────
-    const ARABIC_KEY_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
-    const LATIN_KEY_RE  = /^[a-zA-Z]$/;
-    let _lastKbdIsLtr = !systemIsRtl;
-    // Sync module-level state with systemIsRtl
-    _kbdIsLtr = !systemIsRtl;
-
-    function applyKbdDirection(isLtr: boolean): void {
-        _lastKbdIsLtr = isLtr;
-        _kbdIsLtr  = isLtr;
-        _kbdSetAt  = Date.now();
-        // Apply immediately to the ghost cursor (create if needed)
-        const gc = getOrCreateGhostCursor();
-        gc.classList.remove('dir-rtl', 'dir-ltr');
-        gc.classList.add(isLtr ? 'dir-ltr' : 'dir-rtl');
-    }
-
-    const kb = (navigator as any).keyboard;
-
-    async function checkLayout(): Promise<void> {
-        if (!kb || typeof kb.getLayoutMap !== 'function') return;
-        try {
-            const layoutMap = await kb.getLayoutMap();
-            const aChar: string = layoutMap.get('KeyA') ?? '';
-            applyKbdDirection(!ARABIC_KEY_RE.test(aChar));
-        } catch { }
-    }
-
-    // Check on startup
-    checkLayout();
-
-    // ── Alt+Shift detection via keyup ─────────────────────────────────
-    // VS Code intercepts Alt+Shift so `layoutchange` never fires.
-    // But keyup on Alt/Shift DOES fire, and the OS layout is already
-    // updated by then. We check 100ms after to let the OS settle.
-    document.addEventListener('keyup', (e: KeyboardEvent) => {
-        if (e.key === 'Alt' || e.key === 'Shift') {
-            setTimeout(checkLayout, 100);
-        }
-    }, true);
-
-    // ── keydown: update on first keypress (fallback + char-level) ─────
-    document.addEventListener('keydown', (e: KeyboardEvent) => {
-        const key = e.key;
-        if (!key || key.length !== 1) return;
-        const target = e.target as Element;
-        const monacoEditor = target?.closest?.('.monaco-editor');
-        if (!monacoEditor || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) return;
-        if (isMainCodeEditor(monacoEditor)) return;
-        if (ARABIC_KEY_RE.test(key))     applyKbdDirection(false);
-        else if (LATIN_KEY_RE.test(key)) applyKbdDirection(true);
-        // Neutral (space/digits/punct): keep last direction
-    }, true);
 }
+
 
 
 
