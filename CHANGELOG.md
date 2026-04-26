@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0] - 2026-04-27
+
+### Added
+- **Per-line direction detection** — each `view-line` gets a `data-rtl-dir` attribute (`rtl` or `ltr`) based on its actual text content, allowing mixed Arabic/English conversations to render correctly line by line
+- **Ghost cursor overlay** — a custom cursor element (`#copilot-rtl-ghost-cursor`) replaces Monaco's native cursor in Copilot Chat editors; it uses `getScrolledVisiblePosition()` for RTL lines and DOM Range for LTR lines to achieve pixel-perfect positioning
+- **RTL click interceptor** — single clicks on RTL lines use `caretRangeFromPoint()` + a custom column calculator to correctly position the cursor in mirrored Arabic text
+- **Arabic-aware double-click word selection** — double-click on Arabic text selects the full word using Unicode-aware boundary detection (`[\u0600-\u06FF…]`), since Monaco's built-in `getWordAtPosition` only recognizes ASCII word characters
+
+### Fixed
+- **LTR first-character clipping** — moved `padding-right: 8px` from the shared `view-lines` container to individual RTL lines only, preventing the first character of English lines from being hidden behind the scroll origin
+- **Click interceptor using wrong event** — switched from `pointerdown` to `mousedown`; `PointerEvent.detail` is always `0` in Electron, so double-click detection (`detail === 2`) was never triggering
+- **Monaco overriding word selection** — added `dblclick` event blocker on RTL view-lines to prevent Monaco's native (broken) RTL word selection from overriding our custom selection
+
+
 ## [0.2.0] - 2026-04-25
 
 ### Added
