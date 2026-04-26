@@ -23,7 +23,7 @@ function getEditorService(): any | null {
     const svc = (window as any).__rtlEditorService;
     if (svc && typeof svc.listCodeEditors === 'function') {
         _cachedService = svc;
-        console.log('[RTL Engine] ✓ __rtlEditorService found! editors:', svc.listCodeEditors().length);
+        // console.log('[RTL Engine] ✓ __rtlEditorService found! editors:', svc.listCodeEditors().length);
     }
     return _cachedService;
 }
@@ -54,9 +54,9 @@ export function getNonCodeEditors(): Array<{ instance: any; domNode: HTMLElement
                 if (dn && !isMainCodeEditor(dn)) {
                     results.push({ instance: editor, domNode: dn });
                 }
-            } catch {}
+            } catch { }
         }
-    } catch {}
+    } catch { }
 
     return results;
 }

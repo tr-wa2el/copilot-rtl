@@ -39,7 +39,7 @@ export function applyRtlFont(editorInstance: any, config: FontConfig): void {
             fontSize: config.fontSize,       //   DOMLineBreaksComputer uses options.fontFamily
             lineHeight: config.lineHeight,   //   NOT CSS — so we must set it here
         });
-        console.log('[RTL Engine] ✓ fontFamily + wordWrap:on applied to', editorId, '→', config.fontFamily);
+        // console.log('[RTL Engine] ✓ fontFamily + wordWrap:on applied to', editorId, '→', config.fontFamily);
     } catch (e) {
         console.warn('[RTL Engine] updateOptions failed:', e);
     }
@@ -49,8 +49,8 @@ export function applyRtlFont(editorInstance: any, config: FontConfig): void {
         document.fonts.ready.then(() => {
             try {
                 editorInstance.layout();
-                console.log('[RTL Engine] ✓ layout() called after fonts ready for', editorId);
-            } catch {}
+                // console.log('[RTL Engine] ✓ layout() called after fonts ready for', editorId);
+            } catch { }
         });
     }
 }

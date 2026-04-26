@@ -308,15 +308,46 @@ export function attachClickInterceptor(): void {
     }, true);
 
     // ── Keyboard Language Detector ─────────────────────────────────────
-    // e.key gives the actual character BEFORE it appears in the editor.
-    // This lets the cursor flag flip instantly when keyboard language changes.
     const ARABIC_KEY_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
-    // Only ACTUAL Latin LETTERS flip to LTR — NOT spaces, digits, or punctuation (bidi-neutral)
+    // Only actual Latin letters flip to LTR — spaces/digits/punctuation are bidi-neutral
     const LATIN_KEY_RE  = /^[a-zA-Z]$/;
 
-    // Track last known keyboard direction so we can apply it when editor gains focus
+    // Track last known keyboard direction
     let _lastKbdIsLtr = !systemIsRtl;
 
+    function applyKbdDirection(isLtr: boolean): void {
+        _lastKbdIsLtr = isLtr;
+        const gc = _ghostCursor;
+        if (!gc || gc.style.display === 'none') return;
+        gc.classList.remove('dir-rtl', 'dir-ltr');
+        gc.classList.add(isLtr ? 'dir-ltr' : 'dir-rtl');
+    }
+
+    // ── Method 1: navigator.keyboard.getLayoutMap() ──────────────────────
+    // Fires ON Alt+Shift (before any typing) in Chromium/Electron.
+    // KeyA maps to 'ش' on Arabic keyboard, 'a' on English keyboard.
+    const kb = (navigator as any).keyboard;
+    if (kb && typeof kb.getLayoutMap === 'function') {
+        const checkLayout = async () => {
+            try {
+                const layoutMap = await kb.getLayoutMap();
+                const aChar: string = layoutMap.get('KeyA') ?? '';
+                applyKbdDirection(!ARABIC_KEY_RE.test(aChar));
+            } catch {}
+        };
+
+        // Check on startup
+        checkLayout();
+
+        // Listen for layout changes (fires on Alt+Shift / Win+Space)
+        if (typeof kb.addEventListener === 'function') {
+            kb.addEventListener('layoutchange', checkLayout);
+        }
+    }
+
+    // ── Method 2: keydown fallback ───────────────────────────────────────
+    // Updates on the FIRST character typed after a layout switch,
+    // as a fallback if navigator.keyboard is unavailable/restricted.
     document.addEventListener('keydown', (e: KeyboardEvent) => {
         const key = e.key;
         if (!key || key.length !== 1) return;
@@ -327,20 +358,14 @@ export function attachClickInterceptor(): void {
         if (isMainCodeEditor(monacoEditor)) return;
 
         if (ARABIC_KEY_RE.test(key)) {
-            _lastKbdIsLtr = false;
+            applyKbdDirection(false);
         } else if (LATIN_KEY_RE.test(key)) {
-            _lastKbdIsLtr = true;
-        } else {
-            return; // Punctuation/numbers stay with last known direction
+            applyKbdDirection(true);
         }
-
-        // Immediately flip the ghost cursor flag
-        const gc = _ghostCursor;
-        if (!gc || gc.style.display === 'none') return;
-        gc.classList.remove('dir-rtl', 'dir-ltr');
-        gc.classList.add(_lastKbdIsLtr ? 'dir-ltr' : 'dir-rtl');
+        // Neutral chars (space/digits/punct): keep last direction
     }, true);
 }
+
 
 
 // ── Editor Lifecycle ───────────────────────────────────────────────────

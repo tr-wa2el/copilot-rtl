@@ -216,7 +216,7 @@ function startStatePolling(): void {
                 if (!nowEnabled && _enabled) shutdown();
                 else if (nowEnabled && !_enabled) reinitialize();
             })
-            .catch(() => {});
+            .catch(() => { });
     }, 1500);
 }
 
@@ -234,7 +234,7 @@ function startFlickerSpy(): void {
             if (m.type === 'attributes' && m.attributeName === 'class') {
                 const classes = el.classList.toString();
                 if (el.classList.contains('monaco-editor') || el.classList.contains('view-line')) {
-                    console.log(`[FLICKER-SPY] class changed on <${el.tagName}.${el.className.split(' ').slice(0, 3).join('.')}> → "${classes.substring(0, 100)}"`, new Error().stack?.split('\n').slice(1, 4).join(' | '));
+                    // console.log(`[FLICKER-SPY] class changed on <${el.tagName}.${el.className.split(' ').slice(0, 3).join('.')}> → "${classes.substring(0, 100)}"`, new Error().stack?.split('\n').slice(1, 4).join(' | '));
                 }
             }
 
@@ -247,7 +247,7 @@ function startFlickerSpy(): void {
                     const fs = style.fontSize;
                     const dir = style.direction;
                     if (ff || fs || dir) {
-                        console.log(`[FLICKER-SPY] style on <${tag}.${el.className.split(' ')[0]}> → font:${ff || '-'} size:${fs || '-'} dir:${dir || '-'}`);
+                        // console.log(`[FLICKER-SPY] style on <${tag}.${el.className.split(' ')[0]}> → font:${ff || '-'} size:${fs || '-'} dir:${dir || '-'}`);
                     }
                 }
             }
@@ -257,7 +257,7 @@ function startFlickerSpy(): void {
                 for (let i = 0; i < m.addedNodes.length; i++) {
                     const node = m.addedNodes[i] as HTMLElement;
                     if (node.nodeType === 1 && node.classList?.contains('view-line')) {
-                        console.log(`[FLICKER-SPY] NEW view-line added (Monaco re-render)`, node.textContent?.substring(0, 50));
+                        // console.log(`[FLICKER-SPY] NEW view-line added (Monaco re-render)`, node.textContent?.substring(0, 50));
                     }
                 }
             }
@@ -272,14 +272,14 @@ function startFlickerSpy(): void {
             attributeFilter: ['class', 'style'],
             childList: true,
         });
-        console.log('[FLICKER-SPY] Active — watching for style/class changes on Monaco editors');
+        // console.log('[FLICKER-SPY] Active — watching for style/class changes on Monaco editors');
     }, 3000);
 }
 
 // ── BOOT ──────────────────────────────────────────────────────────────
 
 function boot(): void {
-    console.log(`[RTL Engine] v${EXT_VERSION} loaded ✓ (per-line direction)`);
+    // console.log(`[RTL Engine] v${EXT_VERSION} loaded ✓ (per-line direction)`);
     document.documentElement.setAttribute('data-copilot-rtl', EXT_VERSION);
 
     suppressKatexWarnings();
@@ -293,7 +293,7 @@ function boot(): void {
     preventDirectionToggle();
 
     onMonacoReady(() => {
-        console.log('[RTL Engine] Monaco ready — initial scan');
+        // console.log('[RTL Engine] Monaco ready — initial scan');
         processNonCodeMonacos(fontConfig, cursorConfig);
         observeSelectionLayers();
     });
