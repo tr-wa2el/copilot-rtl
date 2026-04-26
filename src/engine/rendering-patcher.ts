@@ -280,10 +280,11 @@ export function injectStyles(config: RenderConfig): void {
     // .view-lines container is RTL. Each .view-line defaults to RTL.
     // English lines get [data-rtl-dir="ltr"] set SYNCHRONOUSLY by MutationObserver
     // (runs as microtask before paint → zero flicker).
-    css += `${parentSel} .view-lines, ${selfSel} .view-lines { direction: rtl !important; unicode-bidi: plaintext !important; padding-right: 8px !important; }`; // ← 8px padding from RTL edge
+    css += `${parentSel} .view-lines, ${selfSel} .view-lines { direction: rtl !important; unicode-bidi: plaintext !important; }`; // padding-right applied per RTL line, not container
 
     // RTL lines (Arabic): explicit RTL + right-aligned
-    css += `${parentSel} .view-line:not([data-rtl-dir="ltr"]), ${selfSel} .view-line:not([data-rtl-dir="ltr"]) { direction: rtl !important; unicode-bidi: plaintext !important; text-align: right !important; }`;
+    // RTL lines: padding-right=8px provides buffer from right edge (replaces container-level padding)
+    css += `${parentSel} .view-line:not([data-rtl-dir="ltr"]), ${selfSel} .view-line:not([data-rtl-dir="ltr"]) { direction: rtl !important; unicode-bidi: plaintext !important; text-align: right !important; padding-right: 8px !important; box-sizing: border-box !important; }`;
 
     // LTR lines (English): explicit LTR + left-aligned.
     // NO font override — keep Cairo consistent with Monaco's internal metrics.
