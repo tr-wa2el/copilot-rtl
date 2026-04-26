@@ -171,28 +171,118 @@ function updateGhostFromEditorApi(
 // ── Cursor Layers (no-op — driven by onDidChangeCursorPosition) ────────
 export function observeCursorLayers(_config: CursorConfig): void {}
 
+// ── Helpers for click-to-column mapping ───────────────────────────────
+
+/**
+ * Map a click point to Monaco column using browser's CSS-aware caret API.
+ * document.caretRangeFromPoint respects our direction:rtl CSS, unlike
+ * Monaco's getTargetAtClientPoint which uses its internal LTR hit-testing.
+ */
+function getColumnFromCaretPoint(viewLineEl: HTMLElement, cx: number, cy: number): number | null {
+    // Use browser's built-in caret-from-point (Chrome/Edge: caretRangeFromPoint)
+    const range = (document as any).caretRangeFromPoint?.(cx, cy) as Range | undefined;
+    if (!range) return null;
+    if (!viewLineEl.contains(range.startContainer)) return null;
+
+    // Count characters before this text node to get Monaco column (1-based)
+    const walker = document.createTreeWalker(viewLineEl, NodeFilter.SHOW_TEXT, null);
+    let col = 1;
+    while (walker.nextNode()) {
+        const node = walker.currentNode as Text;
+        if (node === range.startContainer) {
+            return col + range.startOffset;
+        }
+        col += node.nodeValue!.length;
+    }
+    return null;
+}
+
+/**
+ * Get Monaco lineNumber for a view-line element using its top style offset
+ * matched against Monaco's scroll position.
+ */
+function getLineNumberFromViewLine(
+    viewLineEl: HTMLElement,
+    editorInstance: any
+): number | null {
+    const topStr = viewLineEl.style.top;
+    const topPx  = topStr ? parseFloat(topStr) : NaN;
+    if (isNaN(topPx)) return null;
+
+    const scrollTop: number = editorInstance.getScrollTop?.() ?? 0;
+
+    // Use the view-line's actual rendered height (reliable, avoids getOption complexity)
+    const lineHeight = viewLineEl.getBoundingClientRect().height || 20;
+
+    // Find the top offset of the first visible view-line to account for editor padding
+    const allViewLines = viewLineEl.parentElement?.querySelectorAll('.view-line');
+    let minTop = topPx;
+    if (allViewLines) {
+        for (let i = 0; i < allViewLines.length; i++) {
+            const t = parseFloat((allViewLines[i] as HTMLElement).style.top || '0');
+            if (!isNaN(t) && t < minTop) minTop = t;
+        }
+    }
+
+    // lineNumber = floor((topPx - minTop + scrollTop) / lineHeight) + 1
+    // minTop accounts for editor's top padding (e.g. 12px)
+    const lineNumber = Math.floor((topPx - minTop + scrollTop) / lineHeight) + 1;
+    return lineNumber >= 1 ? lineNumber : null;
+}
+
 // ── Click Interceptor ──────────────────────────────────────────────────
 export function attachClickInterceptor(): void {
     if (_pointerdownAttached) return;
     _pointerdownAttached = true;
+
     document.addEventListener('pointerdown', (e: PointerEvent) => {
         const target = e.target as Element;
         const monacoEditor = target?.closest?.('.monaco-editor');
         if (!monacoEditor || !monacoEditor.classList.contains(CSS_CLASS.EDITOR_RTL)) return;
         if (isMainCodeEditor(monacoEditor)) return;
+
+        // Only intercept clicks on RTL (Arabic) view-lines
+        const viewLine = target.closest?.('.view-line') as HTMLElement | null;
+        const isRtlLine = viewLine
+            ? viewLine.getAttribute('data-rtl-dir') !== 'ltr'
+            : false;
+
+        // DEBUG
+        const dbgRange = (document as any).caretRangeFromPoint?.(e.clientX, e.clientY);
+        console.log(
+            `[RTL-CLICK] target=${(target as HTMLElement).className?.substring(0,30)}` +
+            ` viewLine=${!!viewLine} isRtlLine=${isRtlLine}` +
+            `\n  caretRange: node=${dbgRange?.startContainer?.nodeType}` +
+            ` offset=${dbgRange?.startOffset}` +
+            ` inViewLine=${viewLine ? viewLine.contains(dbgRange?.startContainer) : 'N/A'}` +
+            ` text="${dbgRange?.startContainer?.nodeValue?.substring(0,15) ?? 'N/A'}"`
+        );
+
+        if (!viewLine || !isRtlLine) return;
+
         const editorRecords = getNonCodeEditors();
         const editorInstance = findEditorForDom(monacoEditor, editorRecords);
         if (!editorInstance) return;
-        const viewLines = monacoEditor.querySelector('.view-lines');
-        if (!viewLines?.contains(target)) return;
-        if (typeof editorInstance.getTargetAtClientPoint === 'function') {
-            const hit = editorInstance.getTargetAtClientPoint(e.clientX, e.clientY);
-            if (hit?.position) {
-                e.preventDefault(); e.stopPropagation();
-                setTimeout(() => { editorInstance.setPosition(hit.position); editorInstance.focus(); }, 0);
-            }
-        }
+
+        const column = getColumnFromCaretPoint(viewLine, e.clientX, e.clientY);
+        const lineNumber = getLineNumberFromViewLine(viewLine, editorInstance);
+
+        console.log(`[RTL-CLICK] → column=${column} lineNumber=${lineNumber}` +
+            ` viewLineTop="${viewLine.style.top}"` +
+            ` lineH=${editorInstance.getOption?.(67)} scrollTop=${editorInstance.getScrollTop?.()}`);
+
+        if (column === null || lineNumber === null) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        setTimeout(() => {
+            editorInstance.setPosition({ lineNumber, column });
+            editorInstance.focus();
+        }, 0);
     }, true);
+
+    // RTL click interception is handled by pointerdown above.
+    // LTR lines use Monaco's native click (which works correctly for LTR).
 }
 
 // ── Editor Lifecycle ───────────────────────────────────────────────────
